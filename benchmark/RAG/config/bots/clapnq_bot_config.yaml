@@ -1,11 +1,11 @@
 project_name: "RAG_Benchmark"
 
 # ===========Modify Configuration================
-dataset_name: "FinanceBench" 
+dataset_name: "ClapNQ" 
 
 adapter:
-  module: "src.adapters.financebench_adapter"  
-  class_name: "FinanceBenchAdapter"     
+  module: "src.adapters.clapnq_adapter"  
+  class_name: "ClapNQAdapter"     
 
 execution:
   max_workers: 8
@@ -16,6 +16,7 @@ execution:
   ingest_mode: "directory"
   retrieval_instruction: ""  
   use_vikingbot: true
+  restrict_to_qa_doc: true
 # ==================================  
 
 # ===========VikingBot Configuration============
@@ -24,15 +25,16 @@ vikingbot:
   log_tool_calls: true
 
 paths:
-  dataset_path: "datasets/{dataset_name}/financebench_open_source.jsonl"
+  dataset_path: "datasets/{dataset_name}/clapnq_dev_answerable.jsonl"
   doc_output_dir: "ov_storage/{dataset_name}/{dataset_name}_processed_docs"
   vector_store: "ov_storage/{dataset_name}/{dataset_name}_viking_store_index"
-  output_dir: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}"
-  log_file: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}.log"
+  output_dir: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}_per_query"
+  log_file: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}_per_query/benchmark.log"
 
 
 llm:
   model: "doubao-seed-1-8-251228"
   temperature: 0
   base_url: "https://ark.cn-beijing.volces.com/api/v3"
-  api_key: "YOUR_API_KEY"
+  api_key_env_var: "ARK_API_KEY"
+  api_key: ""

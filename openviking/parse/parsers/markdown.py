@@ -315,6 +315,51 @@ class MarkdownParser(BaseParser):
         current = ""
         current_tokens = 0
 
+        def _force_split_by_boundary(text: str, max_len: int) -> List[str]:
+            # Hard guard for very long single paragraphs: keep each chunk <= max_len,
+            # but try to cut on natural boundaries (line/ sentence/ word) to avoid mid-sentence splits.
+            result = []
+            s = text
+            # Avoid choosing a split point too close to the head of the window;
+            # otherwise we may create tiny prefix chunks.
+            min_tail = max(200, int(max_len * 0.15))
+            while s and len(s) > max_len:
+                window = s[:max_len]
+                split_at = -1
+
+                # Prefer cutting on a line boundary (useful for chat-like content where each turn is one line).
+                idx = window.rfind("\n")
+                if idx >= min_tail:
+                    split_at = idx + 1
+
+                if split_at == -1:
+                    # Then try a sentence boundary near the end of the window.
+                    last = None
+                    for m in re.finditer(r"[.!?。！？](?:\s|$)", window):
+                        last = m
+                    if last and last.end() >= min_tail:
+                        split_at = last.end()
+
+                if split_at == -1:
+                    # Fall back to a word boundary.
+                    idx = window.rfind(" ")
+                    if idx >= min_tail:
+                        split_at = idx + 1
+
+                if split_at == -1:
+                    # Final fallback: hard cut at max_len.
+                    split_at = max_len
+
+                chunk = s[:split_at].strip()
+                if chunk:
+                    result.append(chunk)
+                s = s[split_at:]
+
+            tail = s.strip()
+            if tail:
+                result.append(tail)
+            return result
+
         for para in paragraphs:
             para_tokens = self._estimate_token_count(para)
             para_len = len(para)
@@ -325,8 +370,8 @@ class MarkdownParser(BaseParser):
                     parts.append(current.strip())
                     current = ""
                     current_tokens = 0
-                for i in range(0, len(para), max_chars):
-                    parts.append(para[i : i + max_chars].strip())
+                # When a single paragraph is oversized, split it with boundary-aware heuristics.
+                parts.extend(_force_split_by_boundary(para, max_chars))
             elif (
                 current_tokens + para_tokens > max_size or len(current) + len(para) + 2 > max_chars
             ) and current:
@@ -340,7 +385,30 @@ class MarkdownParser(BaseParser):
         if current.strip():
             parts.append(current.strip())
 
-        return parts if parts else [content]
+        if not parts:
+            return [content]
+
+        def _is_heading_only_chunk(text: str) -> bool:
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            if not (1 <= len(lines) <= 2):
+                return False
+            return all(re.match(r"^#{1,6}\s+\S", ln) for ln in lines)
+
+        if len(parts) >= 2 and _is_heading_only_chunk(parts[0]):
+            # Title-only prefix chunk (e.g. "## Session 23") is merged into the next chunk to avoid low-signal shards.
+            head = parts[0].strip()
+            rest = parts[1].strip()
+            merged = f"{head}\n\n{rest}".strip()
+            if len(merged) <= max_chars:
+                parts[1] = merged
+                parts = parts[1:]
+            else:
+                # Keep the hard char limit, but still try to split on natural boundaries.
+                new_parts = _force_split_by_boundary(merged, max_chars)
+                if new_parts:
+                    parts = new_parts + parts[2:]
+
+        return parts
 
     def _sanitize_for_path(self, text: str, max_length: int = 50) -> str:
         safe = re.sub(

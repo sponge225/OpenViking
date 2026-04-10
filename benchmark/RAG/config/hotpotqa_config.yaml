@@ -22,12 +22,13 @@ paths:
   dataset_path: "datasets/{dataset_name}/hotpot_qa_100.json"
   doc_output_dir: "ov_storage/{dataset_name}/{dataset_name}_processed_docs"
   vector_store: "ov_storage/{dataset_name}/{dataset_name}_viking_store_index"
-  output_dir: "Output/{dataset_name}/experiment_test_top_{retrieval_topk}_1_8_per_query"
-  log_file: "Output/{dataset_name}/experiment_test_top_{retrieval_topk}_1_8_per_query/benchmark.log"
+  output_dir: "Output/{dataset_name}/experiment_test_top_{retrieval_topk}_new_topk_sparse"
+  log_file: "Output/{dataset_name}/experiment_test_top_{retrieval_topk}_new_topk_sparse/benchmark.log"
 
 
 llm:
   model: "doubao-seed-1-8-251228"
   temperature: 0
   base_url: "https://ark.cn-beijing.volces.com/api/v3"
-  api_key: "YOUR_API_KEY"
+  api_key_env_var: "ARK_API_KEY"
+  api_key: ""

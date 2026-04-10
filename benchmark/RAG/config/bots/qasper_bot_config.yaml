@@ -1,21 +1,22 @@
 project_name: "RAG_Benchmark"
 
 # ===========Modify Configuration================
-dataset_name: "SyllabusQA" 
+dataset_name: "Qasper" 
 
 adapter:
-  module: "src.adapters.syllabusqa_adapter"  
-  class_name: "SyllabusQAAdapter"     
+  module: "src.adapters.qasper_adapter"  
+  class_name: "QasperAdapter"     
 
 execution:
-  max_workers: 8
+  max_workers: 12
   ingest_workers: 8
-  retrieval_topk: 5
+  retrieval_topk: 1
   max_queries: null
   skip_ingestion: true
   ingest_mode: "directory"
   retrieval_instruction: ""  
   use_vikingbot: true
+  restrict_to_qa_doc: true
 # ==================================  
 
 # ===========VikingBot Configuration============
@@ -24,15 +25,16 @@ vikingbot:
   log_tool_calls: true
 
 paths:
-  dataset_path: "datasets/{dataset_name}"
+  dataset_path: "datasets/{dataset_name}/qasper-dev-v0.3.json"
   doc_output_dir: "ov_storage/{dataset_name}/{dataset_name}_processed_docs"
   vector_store: "ov_storage/{dataset_name}/{dataset_name}_viking_store_index"
-  output_dir: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}"
-  log_file: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}/benchmark.log"
+  output_dir: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}_per_query"
+  log_file: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}_per_query/benchmark.log"
 
 
 llm:
   model: "doubao-seed-1-8-251228"
   temperature: 0
   base_url: "https://ark.cn-beijing.volces.com/api/v3"
-  api_key: "YOUR_API_KEY"
+  api_key_env_var: "ARK_API_KEY"
+  api_key: ""

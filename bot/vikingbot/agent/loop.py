@@ -545,8 +545,7 @@ class AgentLoop:
                 token_usage=token_usage,
                 time_cost=time_cost,
                 iteration=iteration,
-                tools_used_names=tools_used_names,
-                tools_used=tools_used
+                tools_used_names=tools_used_names
             )
         finally:
             long_running_notified = True

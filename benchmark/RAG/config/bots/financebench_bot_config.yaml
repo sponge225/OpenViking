@@ -1,14 +1,14 @@
 project_name: "RAG_Benchmark"
 
 # ===========Modify Configuration================
-dataset_name: "HotpotQA" 
+dataset_name: "FinanceBench" 
 
 adapter:
-  module: "src.adapters.hotpotqa_adapter"  
-  class_name: "HotpotQAAdapter"     
+  module: "src.adapters.financebench_adapter"  
+  class_name: "FinanceBenchAdapter"     
 
 execution:
-  max_workers: 8
+  max_workers: 10
   ingest_workers: 8
   retrieval_topk: 1
   max_queries: null
@@ -16,23 +16,24 @@ execution:
   ingest_mode: "directory"
   retrieval_instruction: ""  
   use_vikingbot: true
+  restrict_to_qa_doc: true
 # ==================================  
 
 # ===========VikingBot Configuration============
 vikingbot:
-  max_iterations: 10
-  log_tool_calls: true
+  max_iterations: 50
 
 paths:
-  dataset_path: "datasets/{dataset_name}/hotpot_qa_100.json"
+  dataset_path: "datasets/{dataset_name}/financebench_open_source_errors.jsonl"
   doc_output_dir: "ov_storage/{dataset_name}/{dataset_name}_processed_docs"
   vector_store: "ov_storage/{dataset_name}/{dataset_name}_viking_store_index"
-  output_dir: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}"
-  log_file: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}/benchmark.log"
+  output_dir: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}_per_query_err"
+  log_file: "Output/{dataset_name}/experiment_test_bot_top_{retrieval_topk}_per_query_err/benchmark.log"
 
 
 llm:
   model: "doubao-seed-1-8-251228"
   temperature: 0
   base_url: "https://ark.cn-beijing.volces.com/api/v3"
-  api_key: "YOUR_API_KEY"
+  api_key_env_var: "ARK_API_KEY"
+  api_key: ""

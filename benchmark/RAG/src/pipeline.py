@@ -4,6 +4,7 @@ import time
 import uuid
 import random
 import re
+import hashlib
 import threading
 import signal
 import atexit
@@ -214,6 +215,32 @@ class BenchmarkPipeline:
             data = json.load(f)
             items = data.get("results", [])
 
+        # Recompute generation-stage efficiency metrics from generated answers file.
+        # This keeps report consistent even if generation was resumed/partially updated.
+        total = len(items)
+        if total > 0:
+            avg_latency = sum((i.get("retrieval", {}) or {}).get("latency_sec", 0) for i in items) / total
+            avg_in_tokens = (
+                sum((i.get("token_usage", {}) or {}).get("total_input_tokens", 0) for i in items) / total
+            )
+            avg_out_tokens = (
+                sum((i.get("token_usage", {}) or {}).get("llm_output_tokens", 0) for i in items) / total
+            )
+            avg_embed_tokens = (
+                sum((i.get("token_usage", {}) or {}).get("retrieval_embedding_tokens", 0) for i in items)
+                / total
+            )
+            self._update_report(
+                {
+                    "Query Efficiency (Average Per Query)": {
+                        "Average Retrieval Time (s)": avg_latency,
+                        "Average Input Tokens": avg_in_tokens,
+                        "Average Output Tokens": avg_out_tokens,
+                        "Average Retrieval Embedding Tokens": avg_embed_tokens,
+                    }
+                }
+            )
+
         eval_items = items
         eval_results_map = {}
         
@@ -395,19 +422,25 @@ class BenchmarkPipeline:
         
         session_id = f"query_{uuid.uuid4().hex}"
         
+        restrict_to_qa_doc = bool(self.config.get("execution", {}).get("restrict_to_qa_doc", False))
+        allowed_target_uris = self._resolve_target_uris(task, qa) if restrict_to_qa_doc else None
+
         vikingbot_result = run_vikingbot_query(
             question=qa.question,
             config=self.config,
-            session_id=session_id
+            session_id=session_id,
+            allowed_target_uris=allowed_target_uris,
         )
         
         ans = vikingbot_result['answer']
         total_time = vikingbot_result['total_time_sec']
         
         recall = 0.0
-        vb_usage = (vikingbot_result.get("vikingbot", {}) or {}).get("token_usage", {}) or {}
+        vb_usage = vikingbot_result.get("token_usage") or {}
         in_tokens = int(vb_usage.get("prompt_tokens", 0) or 0)
         out_tokens = int(vb_usage.get("completion_tokens", 0) or 0)
+        tools_used_names = vikingbot_result.get("tools_used_names") or []
+        iterations_used = int(vikingbot_result.get("iterations_used") or 0)
         
         self.monitor.worker_end(tokens=in_tokens + out_tokens)
         
@@ -416,12 +449,154 @@ class BenchmarkPipeline:
         return {
             "_global_index": task['id'], "sample_id": task['sample_id'], "question": qa.question,
             "gold_answers": qa.gold_answers, "category": str(qa.category), "evidence": qa.evidence,
-            "retrieval": {"latency_sec": total_time, "uris": [], "mode": "agentic"},
+            "retrieval": {"latency_sec": total_time, "uris": [], "mode": "agentic", "target_uris": allowed_target_uris or []},
             "llm": {"final_answer": ans},
             "metrics": {"Recall": recall}, 
             "token_usage": {"total_input_tokens": in_tokens, "llm_output_tokens": out_tokens},
-            "vikingbot": vikingbot_result.get('vikingbot', {})
+            "vikingbot": {"iterations_used": iterations_used, "tools_used_names": tools_used_names},
         }
+
+    def _sanitize_for_path(self, text: str, max_length: int = 50) -> str:
+        safe = re.sub(
+            r"[^\w\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\u3400-\u4dbf\U00020000-\U0002a6df\s-]",
+            "",
+            text,
+        )
+        safe = re.sub(r"\s+", "_", safe)
+        safe = safe.strip("_")
+        if not safe:
+            return "section"
+        if len(safe) > max_length:
+            hash_suffix = hashlib.sha256(text.encode()).hexdigest()[:8]
+            return f"{safe[: max_length - 9]}_{hash_suffix}"
+        return safe
+
+    def _resolve_child_uri(self, parent_uri: str, raw_child: str) -> str:
+        """
+        Resolve a child directory URI under `parent_uri` in a way that matches OV's on-disk naming.
+        This avoids per-query target_uris pointing to non-existent directories (e.g. '_' vs '__').
+        """
+        def _norm_underscores(s: str) -> str:
+            # OV naming can produce multiple consecutive '_' (e.g. from parentheses/comma),
+            # while some dataset titles/callers collapse them. Treat them as equivalent.
+            return re.sub(r"_+", "_", s).strip("_")
+
+        raw = str(raw_child)
+        try:
+            from openviking_cli.utils.uri import VikingURI
+
+            child = VikingURI.sanitize_segment(raw)
+        except Exception:
+            child = raw
+
+        # Fallback candidate; not guaranteed to match OV storage, so we always probe disk.
+        child_alt = self._sanitize_for_path(raw)
+        child_norm = _norm_underscores(child)
+        child_alt_norm = _norm_underscores(child_alt) if child_alt else ""
+
+        store_path = getattr(self.db, "store_path", None) if self.db is not None else None
+        if not store_path:
+            return f"{parent_uri}/{child_alt or child}"
+
+        prefix = "viking://resources/"
+        rel = parent_uri[len(prefix) :] if parent_uri.startswith(prefix) else ""
+        base_dir = Path(store_path) / "viking" / "default" / "resources"
+        parent_dir = base_dir / rel if rel else base_dir
+
+        if (parent_dir / child).exists():
+            return f"{parent_uri}/{child}"
+        if child_alt and child_alt != child and (parent_dir / child_alt).exists():
+            return f"{parent_uri}/{child_alt}"
+        if not parent_dir.exists():
+            return f"{parent_uri}/{child_alt or child}"
+
+        candidates = []
+        for p in parent_dir.iterdir():
+            if not p.is_dir():
+                continue
+            name = p.name
+            if name == child:
+                return f"{parent_uri}/{name}"
+            if child_alt and name == child_alt:
+                return f"{parent_uri}/{name}"
+            # Handle cases like `Gibson__cocktail__doc` vs `Gibson_cocktail_doc`.
+            name_norm = _norm_underscores(name)
+            if child_norm and name_norm == child_norm:
+                return f"{parent_uri}/{name}"
+            if child_alt_norm and name_norm == child_alt_norm:
+                return f"{parent_uri}/{name}"
+            for base in (child, child_alt):
+                if not base:
+                    continue
+                if name.startswith(base + "_"):
+                    suffix = name[len(base) + 1 :]
+                    if suffix.isdigit():
+                        candidates.append((0, int(suffix), name))
+                    elif re.fullmatch(r"[0-9a-f]{8}", suffix, flags=re.IGNORECASE):
+                        candidates.append((1, 0, name))
+                else:
+                    # Also consider suffix matching on normalized forms.
+                    base_norm = _norm_underscores(base)
+                    if base_norm and name_norm.startswith(base_norm + "_"):
+                        suffix = name_norm[len(base_norm) + 1 :]
+                        if suffix.isdigit():
+                            candidates.append((0, int(suffix), name))
+                        elif re.fullmatch(r"[0-9a-f]{8}", suffix, flags=re.IGNORECASE):
+                            candidates.append((1, 0, name))
+
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], x[1]))
+            return f"{parent_uri}/{candidates[0][2]}"
+
+        return f"{parent_uri}/{child_alt or child}"
+
+    def _resolve_target_uris(self, task, qa) -> list[str]:
+        dataset_name = self.config.get("dataset_name", "") or ""
+        sample_id = str(task.get("sample_id", ""))
+
+        if dataset_name == "FinanceBench":
+            return [self._resolve_child_uri("viking://resources/pdfs", sample_id)]
+
+        if dataset_name == "SyllabusQA":
+            return [self._resolve_child_uri("viking://resources/SyllabusQA_processed_docs", f"{sample_id}_doc")]
+
+        if dataset_name == "Locomo":
+            return [self._resolve_child_uri("viking://resources/Locomo_processed_docs", f"{sample_id}_doc")]
+
+        if dataset_name == "Qasper":
+            return [self._resolve_child_uri("viking://resources/Qasper_processed_docs", f"{sample_id}_doc")]
+
+        if dataset_name == "ClapNQ":
+            passages = (qa.metadata or {}).get("passages") or []
+            titles = []
+            for p in passages:
+                if isinstance(p, dict):
+                    t = p.get("title")
+                    if t:
+                        titles.append(str(t))
+            uniq = []
+            seen = set()
+            for t in titles:
+                raw = str(t)
+                if raw and raw not in seen:
+                    seen.add(raw)
+                    uniq.append(self._resolve_child_uri("viking://resources/ClapNQ_processed_docs", raw))
+            return uniq
+
+        if dataset_name == "HotpotQA":
+            titles = (qa.metadata or {}).get("supporting_fact_titles") or []
+            uniq = []
+            seen = set()
+            for t in titles:
+                if not t:
+                    continue
+                raw = str(t)
+                if raw and raw not in seen:
+                    seen.add(raw)
+                    uniq.append(self._resolve_child_uri("viking://resources/HotpotQA_processed_docs", f"{raw}_doc"))
+            return uniq
+
+        return []
 
     def _process_evaluation_task(self, item):
         """

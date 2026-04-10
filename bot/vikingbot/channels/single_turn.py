@@ -102,7 +102,6 @@ class SingleTurnChannel(BaseChannel):
                     "time_cost": msg.time_cost,
                     "iteration": msg.iteration,
                     "tools_used_names": msg.tools_used_names,
-                    "tools_used": msg.tools_used,
                 }
                 msg.content = json.dumps(output, ensure_ascii=False)
             self._last_response = msg.content
