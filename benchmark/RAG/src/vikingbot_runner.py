@@ -13,6 +13,9 @@ import atexit
 import urllib.request
 import urllib.error
 import threading
+import asyncio
+import io
+import contextlib
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
@@ -218,6 +221,97 @@ def _build_vikingbot_env(ov_conf_path: str, max_iterations: int) -> dict[str, st
     return env
 
 
+@contextlib.contextmanager
+def _temporary_environ(updates: dict[str, str]):
+    old_values: dict[str, Optional[str]] = {}
+    try:
+        for key, value in updates.items():
+            old_values[key] = os.environ.get(key)
+            os.environ[key] = value
+        yield
+    finally:
+        for key, old in old_values.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+
+def _run_vikingbot_in_process(
+    input_msg: str,
+    session_id: str,
+    ov_conf_path: str,
+    max_iterations: int,
+) -> dict[str, Any]:
+    """
+    Run a single VikingBot query inside the current Python process.
+    This is intended to be used serially by the benchmark generation loop.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    bot_root = repo_root / "bot"
+    if str(bot_root) not in sys.path:
+        sys.path.insert(0, str(bot_root))
+
+    from vikingbot.bus.queue import MessageBus
+    from vikingbot.cli.commands import (
+        _init_bot_data,
+        prepare_agent_channel,
+        prepare_agent_loop,
+        prepare_cron,
+    )
+    from vikingbot.config.loader import ensure_config
+    from vikingbot.session.manager import SessionManager
+
+    env = _build_vikingbot_env(ov_conf_path, max_iterations)
+    bus = MessageBus()
+
+    with _temporary_environ(env):
+        config = ensure_config(Path(ov_conf_path).expanduser())
+        _init_bot_data(config)
+        config.agents.max_tool_iterations = int(max_iterations)
+        session_manager = SessionManager(config.bot_data_path)
+        cron = prepare_cron(bus, quiet=True)
+        channels = prepare_agent_channel(
+            config=config,
+            bus=bus,
+            message=input_msg,
+            session_id=session_id,
+            markdown=False,
+            logs=False,
+            eval=True,
+            sender=None,
+        )
+        agent_loop = prepare_agent_loop(
+            config=config,
+            bus=bus,
+            session_manager=session_manager,
+            cron=cron,
+            quiet=True,
+            eval=True,
+        )
+
+        async def run_once() -> str:
+            task_cron = asyncio.create_task(cron.start())
+            task_channels = asyncio.create_task(channels.start_all())
+            task_agent = asyncio.create_task(agent_loop.run())
+            try:
+                await asyncio.wait([task_channels], return_when=asyncio.FIRST_COMPLETED)
+                for channel in channels.channels.values():
+                    if hasattr(channel, "_last_response") and getattr(channel, "_last_response"):
+                        return getattr(channel, "_last_response")
+                return ""
+            finally:
+                task_cron.cancel()
+                task_channels.cancel()
+                task_agent.cancel()
+                await asyncio.gather(task_cron, task_channels, task_agent, return_exceptions=True)
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            output = asyncio.run(run_once())
+
+    return json.loads(output) if output else {"text": ""}
+
+
 class VikingBotRunner:
     """
     Wrapper for VikingBot to support Agentic RAG evaluation.
@@ -293,37 +387,13 @@ class VikingBotRunner:
                 + scope_line
                 + f"\n\nQuestion: {question}"
             )
-            env = _build_vikingbot_env(ov_conf_path, self.max_iterations)
-            cmd = [
-                "vikingbot",
-                "chat",
-                "-m",
-                input_msg,
-                "-s",
-                session_id,
-                "-e",
-                "--no-markdown",
-                "-c",
-                ov_conf_path,
-            ]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=600,
-                env=env,
+            logger.debug(f"Running VikingBot in-process with config file: {ov_conf_path}")
+            resp_json = _run_vikingbot_in_process(
+                input_msg=input_msg,
+                session_id=session_id,
+                ov_conf_path=ov_conf_path,
+                max_iterations=self.max_iterations,
             )
-            stdout = (result.stdout or "").strip()
-            
-            json_start = stdout.rfind('{"text"')
-            if json_start == -1:
-                raise ValueError(f"No JSON output found in vikingbot stdout (len={len(stdout)})")
-            
-            import re
-            raw_json = stdout[json_start:]
-            raw_json = re.sub(r'[\x00-\x1f\x7f]', ' ', raw_json)
-            resp_json, _ = json.JSONDecoder().raw_decode(raw_json)
             
             result_dict = {
                 "answer": resp_json.get("text", "") or "",
