@@ -121,6 +121,7 @@ class BenchmarkPipeline:
             samples = self.adapter.load_and_transform()    
             tasks = self._prepare_tasks(samples)
             results_map = {}
+            max_workers = self.config['execution']['max_workers']
             
             completed_tasks: Set[int] = set()
             if self.resume:
@@ -137,20 +138,31 @@ class BenchmarkPipeline:
             self.logger.info(f"Total tasks: {len(tasks)}, Remaining: {len(remaining_tasks)}")
             
             if remaining_tasks:
-                pbar = tqdm(total=len(tasks), desc="Generating Answers", unit="task", initial=len(completed_tasks))
-                for task in remaining_tasks:
-                    try:
-                        res = self._process_generation_task(task)
-                        results_map[res['_global_index']] = res
-                        completed_tasks.add(res['_global_index'])
-                        self.checkpoint_manager.update_completed_tasks("generation", completed_tasks, len(tasks))
-                        self._save_partial_results(results_map)
-                    except Exception as e:
-                        self.logger.error(f"Generation failed for task {task['id']}: {e}")
-                        self.monitor.worker_end(success=False)
-                    pbar.set_postfix(self.monitor.get_status_dict())
-                    pbar.update(1)
-                pbar.close()
+                initial_completed = len(completed_tasks)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_task = {
+                        executor.submit(self._process_generation_task, task): task 
+                        for task in remaining_tasks
+                    }
+                    
+                    pbar = tqdm(total=len(tasks), desc="Generating Answers", unit="task", initial=len(completed_tasks))
+                    for future in as_completed(future_to_task):
+                        task = future_to_task[future]
+                        try:
+                            res = future.result()
+                            results_map[res['_global_index']] = res
+                            completed_tasks.add(res['_global_index'])
+                            
+                            newly_completed = len(completed_tasks) - initial_completed
+                            if newly_completed % self.save_frequency == 0 or len(completed_tasks) == len(tasks):
+                                self.checkpoint_manager.update_completed_tasks("generation", completed_tasks, len(tasks))
+                                self._save_partial_results(results_map)
+                        except Exception as e:
+                            self.logger.error(f"Generation failed for task {task['id']}: {e}")
+                            self.monitor.worker_end(success=False)
+                        pbar.set_postfix(self.monitor.get_status_dict())
+                        pbar.update(1)
+                    pbar.close()
             else:
                 self.logger.info("All tasks already completed!")
             
@@ -355,8 +367,7 @@ class BenchmarkPipeline:
         dataset_name = self.config.get('dataset_name', '')
         
         topk = int(self.config['execution']['retrieval_topk'])
-        candidate_k = topk * 3
-        retrieve_res = self.db.retrieve(query=enhanced_query, topk=candidate_k)
+        retrieve_res = self.db.retrieve(query=enhanced_query, topk=topk)
 
         if isinstance(retrieve_res, tuple) and len(retrieve_res) == 2:
             search_res, retrieval_embedding_tokens = retrieve_res
@@ -364,12 +375,7 @@ class BenchmarkPipeline:
             search_res = retrieve_res
             retrieval_embedding_tokens = 0
 
-        candidates = (getattr(search_res, 'resources', []) or [])[:candidate_k]
-        l2_only = [
-            r for r in candidates
-            if getattr(r, 'level', 2) == 2
-            and not str(getattr(r, 'uri', '')).endswith(('/.abstract.md', '/.overview.md', '.abstract.md', '.overview.md'))
-        ][:topk]
+        final_results = (getattr(search_res, 'resources', []) or [])[:topk]
         
         latency = time.time() - t0
         
@@ -377,7 +383,7 @@ class BenchmarkPipeline:
         retrieved_uris = []
         context_blocks = []
         
-        for r in l2_only:
+        for r in final_results:
             retrieved_uris.append(r.uri)
             content = self.db.read_resource(r.uri) if getattr(r, 'level', 2) == 2 else f"{getattr(r, 'abstract', '')}\n{getattr(r, 'overview', '')}"
             retrieved_texts.append(content)

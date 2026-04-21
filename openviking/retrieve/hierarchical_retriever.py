@@ -202,7 +202,7 @@ class HierarchicalRetriever:
 
         # Step 6: Convert results
         matched = await self._convert_to_matched_contexts(candidates, ctx=ctx)
-
+        # matched = [m for m in matched if m.level >= 2]
         final = matched[:limit]
 
         # Record retrieval stats for the observer.

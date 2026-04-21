@@ -207,12 +207,9 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
 
         try:
             if self.input_type == "multimodal":
-                multimodal_inputs = [{"type": "text", "text": text} for text in texts]
-                response = self.client.multimodal_embeddings.create(
-                    input=multimodal_inputs, model=self.model_name
-                )
-                self._update_telemetry_token_usage(response)
-                data = response.data
+                # The multimodal batch response shape can vary across SDK/API versions.
+                # Reuse the already verified single-item embed() path for each text in a small batch.
+                return [self.embed(text, is_query=is_query) for text in texts]
             else:
                 response = self.client.embeddings.create(input=texts, model=self.model_name)
                 self._update_telemetry_token_usage(response)

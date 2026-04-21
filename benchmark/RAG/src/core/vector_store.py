@@ -94,7 +94,7 @@ class VikingStoreWrapper:
 
     def retrieve(self, query: str, topk: int, target_uri: str = "viking://resources"):
         """Execute retrieval with telemetry"""
-        search_res = self.client.find(query=query, limit=topk, target_uri=target_uri, telemetry=True)
+        search_res = self.client.search(query=query, limit=topk, target_uri=target_uri, telemetry=True)
         retrieval_embedding_tokens = 0
         if hasattr(search_res, 'telemetry') and search_res.telemetry:
             retrieval_embedding_tokens = search_res.telemetry.get('summary', {}).get('tokens', {}).get('embedding', {}).get('total', 0)

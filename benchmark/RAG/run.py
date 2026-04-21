@@ -22,6 +22,7 @@ if os.path.exists(ov_config_path):
 try:
     from src.pipeline import BenchmarkPipeline 
     from src.core.vector_store import VikingStoreWrapper
+    from src.core.naive_store_wrapper import NaiveStoreWrapper
     from src.core.llm_client import LLMClientWrapper 
 except SyntaxError as e:
     print(f"\n[Fatal Error] Syntax error while importing modules: {e}")
@@ -68,6 +69,13 @@ def main():
     
     parser.add_argument("--resume", action="store_true", 
                         help="Resume from checkpoint if available")
+
+    parser.add_argument(
+        "--retriever",
+        choices=["openviking", "naive"],
+        default="openviking",
+        help="Retriever to use: 'openviking' (default) or 'naive'",
+    )
     
     args = parser.parse_args()
 
@@ -127,7 +135,28 @@ def main():
         # 2. Vector Store (only for gen/del steps)
         vector_store = None
         if args.step in ["all", "gen", "del"]:
-            vector_store = VikingStoreWrapper(store_path=config['paths']['vector_store'])
+            if args.retriever == "openviking":
+                vector_store = VikingStoreWrapper(store_path=config['paths']['vector_store'])
+            else:
+                naive_cfg = config.get("naive_rag", {}) or {}
+                # Reuse the same API key source as LLM (env var preferred, then config.llm.api_key)
+                embedding_api_key = os.environ.get(
+                    config["llm"].get("api_key_env_var", ""),
+                    config["llm"].get("api_key"),
+                )
+                vector_store = NaiveStoreWrapper(
+                    store_path=config["paths"]["vector_store"],
+                    doc_output_dir=config.get("paths", {}).get("doc_output_dir"),
+                    chunk_size=naive_cfg.get("chunk_size", 512),
+                    chunk_overlap=naive_cfg.get("chunk_overlap", 50),
+                    embedding_model=naive_cfg.get("embedding_model", "ep-20240910084318-g9vqn"),
+                    api_key=embedding_api_key,
+                    api_base=naive_cfg.get("api_base", "https://ark.cn-beijing.volces.com/api/v3"),
+                    dimension=naive_cfg.get("dimension", 1024),
+                    input_type=naive_cfg.get("input_type", "multimodal"),
+                    batch_size=naive_cfg.get("batch_size", 8),
+                    max_concurrent=naive_cfg.get("max_concurrent", 10),
+                )
         
         # 3. LLM Client
         llm_client = None

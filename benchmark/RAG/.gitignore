@@ -10,6 +10,9 @@ ov_storage/
 
 # Evaluation output results
 Output/
+config/
+naive_storage/
+Output_naive/
 
 # Python
 __pycache__/
@@ -37,6 +40,7 @@ wheels/
 .venv/
 env/
 ENV/
+
 
 # IDE
 .vscode/
