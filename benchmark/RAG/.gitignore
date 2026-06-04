@@ -15,6 +15,12 @@ Output_half/
 Output_double/
 Output_sl5/
 Output_sl20/
+Output_split_1/
+Output_split_2/
+Output_double_old/
+Output_half_old/
+output/
+*.sh
 
 # Python
 __pycache__/

@@ -30,23 +30,7 @@ import os
 import csv
 from typing import List, Dict, Any
 
-from .base import BaseAdapter, StandardDoc, StandardSample, StandardQA
-
-# Rule for when answer cannot be found
-ASSESSMENT_INSTRUCTION = """IMPORTANT: Answer strictly based on the provided context above. Do NOT use external knowledge or information not present in the context.
-
-First, assess whether the context contains sufficient information to fully and accurately answer the question. Consider:
-- Does the context directly address the question? Or is the key information missing?
-- Is the information complete? Or are important details absent?
-- Is there conflicting information from different sources?
-- Would answering require significant speculation or guessing?
-
-If the context is INSUFFICIENT (missing key facts, conflicting information, or would require guessing), set "sufficient" to false. The question will be automatically forwarded to a more powerful agent — do NOT guess or fabricate.
-
-If the context is SUFFICIENT, provide a concise and accurate answer.
-
-Respond in the following JSON format:
-{"sufficient": true/false, "answer": "<your answer>", "reasoning": "<brief explanation of why the context is sufficient or insufficient>"}"""
+from .base import BaseAdapter, StandardDoc, StandardSample, StandardQA, ASSESSMENT_INSTRUCTION
 
 # Specific instructions for different categories
 CATEGORY_INSTRUCTIONS = {
@@ -451,12 +435,6 @@ class SyllabusQAAdapter(BaseAdapter):
         """
         Build complete prompt to send to LLM.
         
-        Prompt structure:
-        1. Context content (retrieved document fragments)
-        2. Category-specific instructions
-        3. Rule for when answer cannot be found
-        4. Question
-        
         Args:
             qa: Standardized QA object
             context_blocks: List of retrieved context text blocks
@@ -467,16 +445,10 @@ class SyllabusQAAdapter(BaseAdapter):
                 - Metadata dictionary, containing id
         """
         eff_q = qa.question
-        category = qa.category
         
-        category_instruction = CATEGORY_INSTRUCTIONS.get(category, "")
+        context_text = self._format_context_blocks(context_blocks)
         
-        context_text = "\n\n".join(context_blocks)
-        
-        if category_instruction:
-            full_prompt = f"{context_text}\n\n{category_instruction}\n\n{ASSESSMENT_INSTRUCTION}\n\nQuestion: {eff_q}"
-        else:
-            full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\nQuestion: {eff_q}"
+        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n---\n\nQuestion: {eff_q}"
 
         meta = {"id": qa.metadata.get("id", "")}
         return full_prompt, meta

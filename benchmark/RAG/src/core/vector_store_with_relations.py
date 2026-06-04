@@ -61,7 +61,9 @@ class VikingStoreWithRelations(VikingStoreWrapper):
 
     def __init__(self, store_path: str, relations_topk: int = 0,
                  use_query_expansion: bool = False, llm=None, embedder=None,
-                 strategy: str = "llm_review"):
+                 strategy: str = "llm_review",
+                 relation_keyword_threshold: float = 0.7,
+                 relation_vector_threshold: float = 0.7):
         super().__init__(store_path)
         self.relations_topk = relations_topk
         self._vikingfs_path = os.path.join(store_path, "viking")
@@ -69,6 +71,8 @@ class VikingStoreWithRelations(VikingStoreWrapper):
         self._llm = llm
         self._embedder = embedder
         self._strategy = strategy
+        self._relation_keyword_threshold = float(relation_keyword_threshold)
+        self._relation_vector_threshold = float(relation_vector_threshold)
         self._relations_filename = ".relations.jsonl" if strategy == "blind" else f".relations_{strategy}.jsonl"
         self._embed_cache: dict[str, list] = {}
         self._ref_caches: dict[str, dict[str, dict]] = {}
@@ -188,13 +192,13 @@ class VikingStoreWithRelations(VikingStoreWrapper):
                     rec_keywords = _extract_keywords(rec_query)
                     if rec_keywords:
                         overlap = len(query_keywords & rec_keywords)
-                        if overlap / len(query_keywords) > 0.7:
+                        if overlap / len(query_keywords) > self._relation_keyword_threshold:
                             kw_matched = True
 
                 vec_matched = False
                 if query_embedding and rec_embedding:
                     sim = _cosine_similarity(query_embedding, rec_embedding)
-                    if sim > 0.7:
+                    if sim > self._relation_vector_threshold:
                         vec_matched = True
 
                 if kw_matched or vec_matched:
@@ -290,12 +294,16 @@ class VikingStoreHTTPWithRelations(VikingStoreHTTPWrapper):
     """
 
     def __init__(self, server_url: str, api_key: str = "", store_path: str = "",
-                 embedder=None, strategy: str = "llm_review"):
+                 embedder=None, strategy: str = "llm_review",
+                 relation_keyword_threshold: float = 0.7,
+                 relation_vector_threshold: float = 0.7):
         super().__init__(server_url, api_key)
         self._store_path = store_path
         self._vikingfs_path = os.path.join(store_path, "viking") if store_path else ""
         self._embedder = embedder
         self._strategy = strategy
+        self._relation_keyword_threshold = float(relation_keyword_threshold)
+        self._relation_vector_threshold = float(relation_vector_threshold)
         self._relations_filename = ".relations.jsonl" if strategy == "blind" else f".relations_{strategy}.jsonl"
         self._embed_cache: dict[str, list] = {}
         self._ref_caches: dict[str, dict[str, dict]] = {}
@@ -414,13 +422,13 @@ class VikingStoreHTTPWithRelations(VikingStoreHTTPWrapper):
                     rec_keywords = _extract_keywords(rec_query)
                     if rec_keywords:
                         overlap = len(query_keywords & rec_keywords)
-                        if overlap / len(query_keywords) > 0.7:
+                        if overlap / len(query_keywords) > self._relation_keyword_threshold:
                             kw_matched = True
 
                 vec_matched = False
                 if query_embedding and rec_embedding:
                     sim = _cosine_similarity(query_embedding, rec_embedding)
-                    if sim > 0.7:
+                    if sim > self._relation_vector_threshold:
                         vec_matched = True
 
                 if kw_matched or vec_matched:

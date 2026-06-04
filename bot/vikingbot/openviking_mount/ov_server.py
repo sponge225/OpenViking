@@ -61,6 +61,17 @@ def _cosine_similarity(a: list, b: list) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"[VikingClient] Invalid {name}={raw!r}, using default {default}")
+        return default
+
+
 _embedder_cache = None
 _embedder_tried = False
 
@@ -462,6 +473,8 @@ class VikingClient:
             return []
 
         ref_store = ReferenceStore(parent_dir)
+        keyword_threshold = _env_float("VIKINGBOT_RELATION_KEYWORD_THRESHOLD", 0.7)
+        vector_threshold = _env_float("VIKINGBOT_RELATION_VECTOR_THRESHOLD", 0.7)
         query_embedding = None
         query_keywords = set()
         if query:
@@ -512,11 +525,11 @@ class VikingClient:
                 kw_matched = False
                 if query_keywords and rec_query:
                     rec_kw = _extract_keywords(rec_query)
-                    if rec_kw and len(query_keywords & rec_kw) / len(query_keywords) > 0.7:
+                    if rec_kw and len(query_keywords & rec_kw) / len(query_keywords) > keyword_threshold:
                         kw_matched = True
                 vec_matched = False
                 if query_embedding and rec_embedding:
-                    if _cosine_similarity(query_embedding, rec_embedding) > 0.7:
+                    if _cosine_similarity(query_embedding, rec_embedding) > vector_threshold:
                         vec_matched = True
 
                 if kw_matched or vec_matched:
@@ -526,7 +539,8 @@ class VikingClient:
         results.sort(key=lambda x: x.get("weight", 1.0), reverse=True)
         logger.error(
             f"[Relations] uri={uri} | file={jsonl_path} | "
-            f"records={total_records}, matched={len(results)} | strategy={strategy}"
+            f"records={total_records}, matched={len(results)} | strategy={strategy} | "
+            f"keyword_threshold={keyword_threshold}, vector_threshold={vector_threshold}"
         )
         return results
 

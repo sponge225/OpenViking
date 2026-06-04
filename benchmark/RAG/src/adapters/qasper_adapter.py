@@ -25,12 +25,12 @@ import json
 import os
 from typing import List, Dict, Any
 
-from .base import BaseAdapter, StandardDoc, StandardSample, StandardQA
+from .base import BaseAdapter, StandardDoc, StandardSample, StandardQA, ASSESSMENT_INSTRUCTION
 
-# Specific instructions for different answer types
+# Specific instructions for different answer types (kept for reference, not used currently)
 CATEGORY_INSTRUCTIONS = {
     "extractive": """Extract the exact answer from the paper.
-- Use EXACT wording from the context
+- Use EXACT wording from context
 - Do NOT rephrase or add explanation
 - Provide concise, direct answer""",
     
@@ -46,22 +46,6 @@ CATEGORY_INSTRUCTIONS = {
 - Use ONLY info from context
 - Do NOT invent information"""
 }
-
-# Rule for when answer cannot be found
-ASSESSMENT_INSTRUCTION = """IMPORTANT: Answer strictly based on the provided context above. Do NOT use external knowledge or information not present in the context.
-
-First, assess whether the context contains sufficient information to fully and accurately answer the question. Consider:
-- Does the context directly address the question? Or is the key information missing?
-- Is the information complete? Or are important details absent?
-- Is there conflicting information from different sources?
-- Would answering require significant speculation or guessing?
-
-If the context is INSUFFICIENT (missing key facts, conflicting information, or would require guessing), set "sufficient" to false. The question will be automatically forwarded to a more powerful agent — do NOT guess or fabricate.
-
-If the context is SUFFICIENT, provide a concise and accurate answer.
-
-Respond in the following JSON format:
-{"sufficient": true/false, "answer": "<your answer>", "reasoning": "<brief explanation of why the context is sufficient or insufficient>"}"""
 
 
 class QasperAdapter(BaseAdapter):
@@ -381,31 +365,13 @@ class QasperAdapter(BaseAdapter):
         return "\n".join(md_lines)
 
     def build_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
-        context_text = "\n\n".join(context_blocks) if context_blocks else "No relevant context found."
+        context_text = self._format_context_blocks(context_blocks)
         
-        answer_types = qa.metadata.get("answer_types", [])
-        primary_type = answer_types[0] if answer_types else None
-        
-        category_instruction = CATEGORY_INSTRUCTIONS.get(primary_type, "")
-        
-        if category_instruction:
-            full_prompt = f"""{context_text}
-
-{category_instruction}
-
-{ASSESSMENT_INSTRUCTION}
-
-Question: {qa.question}"""
-        else:
-            full_prompt = f"""{context_text}
-
-{ASSESSMENT_INSTRUCTION}
-
-Question: {qa.question}"""
+        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n---\n\nQuestion: {qa.question}"
 
         meta = {
             "question_id": qa.metadata.get("question_id", ""),
-            "answer_types": answer_types
+            "answer_types": qa.metadata.get("answer_types", [])
         }
         return full_prompt, meta
 

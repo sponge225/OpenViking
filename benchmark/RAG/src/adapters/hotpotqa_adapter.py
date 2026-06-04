@@ -18,8 +18,9 @@ import sys
 
 sys.path.append(str(Path(__file__).parent))
 
-from base import BaseAdapter, StandardDoc, StandardSample, StandardQA
+from base import BaseAdapter, StandardDoc, StandardSample, StandardQA, ASSESSMENT_INSTRUCTION
 
+# CATEGORY_INSTRUCTIONS kept for reference, not used currently
 CATEGORY_INSTRUCTIONS = {
     "bridge": """Answer the bridge-type question using information from the context.
 - Use facts from the context as the basis for reasoning
@@ -31,21 +32,6 @@ CATEGORY_INSTRUCTIONS = {
 - Highlight similarities and differences clearly
 - Draw conclusions based on the evidence"""
 }
-
-ASSESSMENT_INSTRUCTION = """IMPORTANT: Answer strictly based on the provided context above. Do NOT use external knowledge or information not present in the context.
-
-First, assess whether the context contains sufficient information to fully and accurately answer the question. Consider:
-- Does the context directly address the question? Or is the key information missing?
-- Is the information complete? Or are important details absent?
-- Is there conflicting information from different sources?
-- Would answering require significant speculation or guessing?
-
-If the context is INSUFFICIENT (missing key facts, conflicting information, or would require guessing), set "sufficient" to false. The question will be automatically forwarded to a more powerful agent — do NOT guess or fabricate.
-
-If the context is SUFFICIENT, provide a concise and accurate answer.
-
-Respond in the following JSON format:
-{"sufficient": true/false, "answer": "<your answer>", "reasoning": "<brief explanation of why the context is sufficient or insufficient>"}"""
 
 
 class HotpotQAAdapter(BaseAdapter):
@@ -213,25 +199,9 @@ class HotpotQAAdapter(BaseAdapter):
         return evidence
 
     def build_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
-        context_text = "\n\n".join(context_blocks)
+        context_text = self._format_context_blocks(context_blocks)
         
-        category = qa.category
-        category_instruction = CATEGORY_INSTRUCTIONS.get(category, "")
-        
-        if category_instruction:
-            full_prompt = f"""{context_text}
-
-{category_instruction}
-
-{ASSESSMENT_INSTRUCTION}
-
-Question: {qa.question}"""
-        else:
-            full_prompt = f"""{context_text}
-
-{ASSESSMENT_INSTRUCTION}
-
-Question: {qa.question}"""
+        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n---\n\nQuestion: {qa.question}"
 
         meta = {
             "id": qa.metadata.get("id", ""),

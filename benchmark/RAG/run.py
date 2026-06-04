@@ -211,6 +211,8 @@ def main():
                 relations_topk = config['execution'].get('relations_topk', 0)
                 use_query_expansion = config['execution'].get('use_query_expansion', False)
                 link_strategy = config['execution'].get('link_strategy', 'llm_review')
+                relation_keyword_threshold = config['execution'].get('relation_keyword_threshold', 0.7)
+                relation_vector_threshold = config['execution'].get('relation_vector_threshold', 0.7)
 
                 embedder = None
                 embedding_cfg = config.get('embedding', {})
@@ -234,8 +236,15 @@ def main():
                     llm=llm_client if use_query_expansion else None,
                     embedder=embedder,
                     strategy=link_strategy,
+                    relation_keyword_threshold=relation_keyword_threshold,
+                    relation_vector_threshold=relation_vector_threshold,
                 )
-                logger.info(f"Using VikingStoreWithRelations (relations_topk={relations_topk}, query_expansion={use_query_expansion}, link_strategy={link_strategy})")
+                logger.info(
+                    "Using VikingStoreWithRelations "
+                    f"(relations_topk={relations_topk}, query_expansion={use_query_expansion}, "
+                    f"link_strategy={link_strategy}, relation_keyword_threshold={relation_keyword_threshold}, "
+                    f"relation_vector_threshold={relation_vector_threshold})"
+                )
             else:
                 vector_store = VikingStoreWrapper(store_path=config['paths']['vector_store'])
 

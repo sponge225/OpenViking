@@ -15,22 +15,7 @@ import sys
 
 sys.path.append(str(Path(__file__).parent))
 
-from base import BaseAdapter, StandardDoc, StandardSample, StandardQA
-
-ASSESSMENT_INSTRUCTION = """IMPORTANT: Answer strictly based on the provided context above. Do NOT use external knowledge or information not present in the context.
-
-First, assess whether the context contains sufficient information to fully and accurately answer the question. Consider:
-- Does the context directly address the question? Or is the key information missing?
-- Is the information complete? Or are important details absent?
-- Is there conflicting information from different sources?
-- Would answering require significant speculation or guessing?
-
-If the context is INSUFFICIENT (missing key facts, conflicting information, or would require guessing), set "sufficient" to false. The question will be automatically forwarded to a more powerful agent — do NOT guess or fabricate.
-
-If the context is SUFFICIENT, provide a concise and accurate answer.
-
-Respond in the following JSON format:
-{"sufficient": true/false, "answer": "<your answer>", "reasoning": "<brief explanation of why the context is sufficient or insufficient>"}"""
+from base import BaseAdapter, StandardDoc, StandardSample, StandardQA, ASSESSMENT_INSTRUCTION
 
 
 def sanitize_filename(name, max_length=150):
@@ -203,7 +188,7 @@ class ClapNQAdapter(BaseAdapter):
         return standard_samples
 
     def build_prompt(self, qa, context_blocks):
-        context_text = "\n\n".join(context_blocks)
+        context_text = self._format_context_blocks(context_blocks)
         full_prompt = (
             f"{context_text}\n\n"
             f"{ASSESSMENT_INSTRUCTION}\n\n"
@@ -211,7 +196,7 @@ class ClapNQAdapter(BaseAdapter):
             "not necessarily as a specific person or object.\n"
             "If a question includes constraints and the context provides the relevant facts, "
             "answer within that scope even if the constraint is not repeated explicitly.\n\n"
-            f"Question: {qa.question}"
+            f"---\n\nQuestion: {qa.question}"
         )
         meta = {
             "id": qa.metadata.get("id", ""),
