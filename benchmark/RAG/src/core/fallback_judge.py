@@ -33,7 +33,26 @@ def _check_refusal_patterns(answer: str) -> JudgeVerdict:
     return JudgeVerdict(should_fallback=False, reasoning="Answer looks valid")
 
 
-def judge_answer(sufficient: bool, answer: str, reasoning: str = "") -> JudgeVerdict:
+def judge_answer(
+    sufficient: bool,
+    answer: str,
+    reasoning: str = "",
+    action: str = "answer",
+    audit_needs_more: bool = False,
+    audit_reason: str = "",
+) -> JudgeVerdict:
+    if action == "fallback":
+        return JudgeVerdict(
+            should_fallback=True,
+            reasoning=f"Phase 1 routed to fallback: {reasoning}" if reasoning else "Phase 1 routed to fallback",
+        )
+    if audit_needs_more:
+        return JudgeVerdict(
+            should_fallback=True,
+            reasoning=f"Phase 1 evidence audit routed to fallback: {audit_reason}"
+            if audit_reason
+            else "Phase 1 evidence audit routed to fallback",
+        )
     if not sufficient:
         return JudgeVerdict(
             should_fallback=True,

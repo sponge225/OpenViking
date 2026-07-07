@@ -7,13 +7,13 @@ This parser implements the new simplified architecture:
 - Parse structure and create directory structure directly in VikingFS
 - No LLM calls during parsing (semantic generation moved to SemanticQueue)
 - Support mixed directory structure (files + subdirectories)
-- Small sections (< 800 tokens) are merged with adjacent sections
+- Small sections (< 512 tokens) are merged with adjacent sections
 
 The parser handles scenarios:
 1. Small files (< 4000 tokens) → save as single file with original name
 2. Large files with sections → split by sections with merge logic
 3. Sections with subsections → section becomes directory
-4. Small sections (< 800 tokens) → merged with adjacent sections
+4. Small sections (< 512 tokens) → merged with adjacent sections
 5. Oversized sections without subsections → split by paragraphs
 """
 

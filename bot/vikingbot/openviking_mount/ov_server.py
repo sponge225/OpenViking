@@ -18,36 +18,7 @@ viking_resource_prefix = "viking://resources/"
 
 # --- Relation matching utilities ---
 
-_ENGLISH_STOPWORDS = frozenset({
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "is", "it", "as", "be", "was", "were",
-    "been", "are", "am", "do", "did", "does", "has", "had", "have", "will",
-    "would", "could", "should", "may", "might", "shall", "can", "not", "no",
-    "nor", "so", "if", "then", "than", "that", "this", "these", "those",
-    "what", "which", "who", "whom", "how", "when", "where", "why",
-    "all", "each", "every", "both", "few", "more", "most", "other", "some",
-    "such", "only", "own", "same", "too", "very", "just", "about", "above",
-    "after", "again", "also", "any", "because", "before", "below", "between",
-    "during", "into", "its", "out", "over", "through", "under", "until",
-    "up", "down", "here", "there", "once", "further", "her", "his", "she",
-    "he", "him", "his", "her", "hers", "its", "they", "them", "their",
-    "theirs", "our", "ours", "your", "yours", "we", "you", "me", "my",
-    "myself", "yourself", "himself", "herself", "itself", "themselves",
-    "ourselves", "yourselves", "being", "having", "doing",
-})
-
-
-def _extract_keywords(text: str) -> set:
-    if not text:
-        return set()
-    tokens = text.lower().split()
-    result = set()
-    for t in tokens:
-        t = t.strip(".,;:!?\"'()[]{}—–-")
-        if len(t) <= 2 or t in _ENGLISH_STOPWORDS:
-            continue
-        result.add(t)
-    return result
+_DEFAULT_RELATION_SIMILARITY_THRESHOLD = 0.6
 
 
 def _cosine_similarity(a: list, b: list) -> float:
@@ -61,15 +32,44 @@ def _cosine_similarity(a: list, b: list) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, "")
-    if not raw:
-        return default
+def _get_relations_similarity_threshold() -> float:
+    raw = os.environ.get(
+        "VIKINGBOT_RELATIONS_SIMILARITY_THRESHOLD",
+        str(_DEFAULT_RELATION_SIMILARITY_THRESHOLD),
+    )
     try:
         return float(raw)
-    except ValueError:
-        logger.warning(f"[VikingClient] Invalid {name}={raw!r}, using default {default}")
-        return default
+    except (TypeError, ValueError):
+        return _DEFAULT_RELATION_SIMILARITY_THRESHOLD
+
+
+def _select_top_relation_groups(group_scores: dict[str, float], topk: int) -> dict[str, float]:
+    if topk <= 0:
+        return dict(group_scores)
+    ranked_groups = sorted(group_scores.items(), key=lambda x: (-x[1], x[0]))
+    return dict(ranked_groups[:topk])
+
+
+def update_active_relation_groups(
+    active_group_scores: dict[str, float],
+    candidates: list[dict],
+    topk: int,
+) -> tuple[set[str] | None, set[str]]:
+    if topk <= 0:
+        return None, set()
+
+    group_scores = dict(active_group_scores)
+    for item in candidates:
+        group_key = item["group_key"]
+        similarity = item["similarity"]
+        if similarity > group_scores.get(group_key, -1.0):
+            group_scores[group_key] = similarity
+
+    selected_scores = _select_top_relation_groups(group_scores, topk)
+    active_group_scores.clear()
+    active_group_scores.update(selected_scores)
+    selected_groups = set(selected_scores)
+    return selected_groups, set(group_scores) - selected_groups
 
 
 _embedder_cache = None
@@ -463,32 +463,44 @@ class VikingClient:
             exclude_uri=exclude_uri,
         )
 
-    async def relations(self, uri: str, query: str = "", strategy: str = "llm_review") -> list[dict[str, Any]]:
-        """查询 uri 的关联文档，通过磁盘 JSONL 直接读取 + 双路匹配"""
+    async def relations(
+        self,
+        uri: str,
+        query: str = "",
+        strategy: str = "llm_review",
+        include_match_meta: bool = False,
+    ) -> list[dict[str, Any]]:
+        """查询 uri 的关联文档，通过磁盘 JSONL 直接读取 + embedding 匹配"""
+        total_start = time.time()
         parent_dir = self._uri_to_parent_path(uri)
         relations_filename = ".relations.jsonl" if strategy == "blind" else f".relations_{strategy}.jsonl"
         jsonl_path = os.path.join(parent_dir, relations_filename)
         if not os.path.exists(jsonl_path):
-            logger.error(f"[Relations] No relations file for {uri}: {jsonl_path}")
+            logger.info(
+                f"[Relations][PROFILE] missing_file uri={uri} | file={jsonl_path} | "
+                f"strategy={strategy} | total_ms={(time.time() - total_start) * 1000:.0f}"
+            )
             return []
 
         ref_store = ReferenceStore(parent_dir)
-        keyword_threshold = _env_float("VIKINGBOT_RELATION_KEYWORD_THRESHOLD", 0.7)
-        vector_threshold = _env_float("VIKINGBOT_RELATION_VECTOR_THRESHOLD", 0.7)
         query_embedding = None
-        query_keywords = set()
+        embed_ms = 0.0
         if query:
-            query_keywords = _extract_keywords(query)
             embedder = _get_embedder()
             if embedder:
+                embed_start = time.time()
                 try:
                     query_embedding = embedder.embed(query)
                 except Exception:
                     pass
+                embed_ms = (time.time() - embed_start) * 1000
 
+        similarity_threshold = _get_relations_similarity_threshold()
         results = []
+        candidates: list[dict[str, Any]] = []
         seen = set()
         total_records = 0
+        scan_start = time.time()
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -501,10 +513,10 @@ class VikingClient:
 
                 total_records += 1
                 uri1, uri2 = rec.get("uri1", ""), rec.get("uri2", "")
-                if uri1 == uri2 or (uri1 != uri and uri2 != uri):
+                if uri1 == uri2 or uri1 != uri:
                     continue
-                target = uri2 if uri1 == uri else uri1
-                if target in seen:
+                target = uri2
+                if target.endswith(".abstract.md") or target.endswith(".overview.md"):
                     continue
 
                 question_id = rec.get("question_id", "")
@@ -513,34 +525,73 @@ class VikingClient:
                 rec_embedding = ref.get("embedding") if ref else rec.get("query_embedding")
                 rec_weight = rec.get("weight", 1.0)
 
-                if question_id == "":
-                    seen.add(target)
-                    results.append({"uri": target, "reason": rec.get("reason", rec_query), "weight": rec_weight})
-                    continue
                 if not query:
+                    group_key = question_id or rec_query or target
+                    if target in seen:
+                        continue
                     seen.add(target)
-                    results.append({"uri": target, "reason": rec_query, "weight": rec_weight})
+                    result = {
+                        "uri": target,
+                        "reason": rec.get("reason", rec_query),
+                        "weight": rec_weight,
+                        "question_id": question_id,
+                    }
+                    if include_match_meta:
+                        result.update({
+                            "source_uri": uri,
+                            "group_key": group_key,
+                            "similarity": 0.0,
+                        })
+                    results.append(result)
                     continue
 
-                kw_matched = False
-                if query_keywords and rec_query:
-                    rec_kw = _extract_keywords(rec_query)
-                    if rec_kw and len(query_keywords & rec_kw) / len(query_keywords) > keyword_threshold:
-                        kw_matched = True
-                vec_matched = False
                 if query_embedding and rec_embedding:
-                    if _cosine_similarity(query_embedding, rec_embedding) > vector_threshold:
-                        vec_matched = True
+                    sim = _cosine_similarity(query_embedding, rec_embedding)
+                    if sim > similarity_threshold:
+                        group_key = question_id or rec_query or target
+                        candidates.append({
+                            "target": target,
+                            "similarity": sim,
+                            "weight": rec_weight,
+                            "group_key": group_key,
+                            "result": {
+                                "uri": target,
+                                "reason": rec.get("reason", rec_query),
+                                "weight": rec_weight,
+                                "question_id": question_id,
+                                "source_uri": uri,
+                                "group_key": group_key,
+                                "similarity": sim,
+                            },
+                        })
 
-                if kw_matched or vec_matched:
-                    seen.add(target)
-                    results.append({"uri": target, "reason": rec.get("reason", rec_query), "weight": rec_weight})
+        for item in sorted(
+            candidates,
+            key=lambda x: (-x["similarity"], x["target"]),
+        ):
+            result = item["result"]
+            target = result["uri"]
+            if target in seen:
+                continue
+            seen.add(target)
+            if not include_match_meta:
+                result = {
+                    "uri": result["uri"],
+                    "reason": result["reason"],
+                    "weight": result["weight"],
+                    "question_id": result["question_id"],
+                }
+            results.append(result)
 
-        results.sort(key=lambda x: x.get("weight", 1.0), reverse=True)
-        logger.error(
-            f"[Relations] uri={uri} | file={jsonl_path} | "
+        scan_ms = (time.time() - scan_start) * 1000
+        if not query:
+            results.sort(key=lambda x: x.get("weight", 1.0), reverse=True)
+        logger.info(
+            f"[Relations][PROFILE] uri={uri} | file={jsonl_path} | "
             f"records={total_records}, matched={len(results)} | strategy={strategy} | "
-            f"keyword_threshold={keyword_threshold}, vector_threshold={vector_threshold}"
+            f"match_mode=embedding_candidates, similarity_threshold={similarity_threshold}, "
+            f"embed_ms={embed_ms:.0f}, scan_ms={scan_ms:.0f}, "
+            f"total_ms={(time.time() - total_start) * 1000:.0f}"
         )
         return results
 
@@ -549,12 +600,38 @@ class VikingClient:
         strategy: str = "llm_review", weight: float = 1.0,
     ) -> None:
         """创建 from_uri → uris 的关联边，直接写入磁盘 JSONL"""
+        link_start = time.time()
         if isinstance(to_uris, str):
             to_uris = [to_uris]
+        input_count = len(to_uris)
+        created = 0
+        skipped_self = 0
+        failed = 0
+        append_ms_values: list[float] = []
         for to_uri in to_uris:
             if from_uri == to_uri:
+                skipped_self += 1
                 continue
-            self._append_relation(from_uri, to_uri, query, reason, strategy=strategy, weight=weight)
+            append_start = time.time()
+            try:
+                if self._append_relation(from_uri, to_uri, query, reason, strategy=strategy, weight=weight):
+                    created += 1
+            except Exception:
+                failed += 1
+                raise
+            finally:
+                append_ms_values.append((time.time() - append_start) * 1000)
+
+        total_ms = (time.time() - link_start) * 1000
+        avg_append_ms = sum(append_ms_values) / max(len(append_ms_values), 1)
+        max_append_ms = max(append_ms_values) if append_ms_values else 0.0
+        log_fn = logger.info if total_ms >= 100 or input_count > 1 else logger.debug
+        log_fn(
+            f"[RelationsLink][PROFILE] from={from_uri} | to_count={input_count}, "
+            f"created={created}, skipped_self={skipped_self}, failed={failed}, "
+            f"strategy={strategy}, total_ms={total_ms:.0f}, "
+            f"avg_append_ms={avg_append_ms:.0f}, max_append_ms={max_append_ms:.0f}"
+        )
 
     def _uri_to_local_path(self, uri: str) -> str:
         rel = uri[len("viking://"):] if uri.startswith("viking://") else uri
@@ -565,20 +642,27 @@ class VikingClient:
         return local_path if os.path.isdir(local_path) else os.path.dirname(local_path)
 
     def _append_relation(self, uri1: str, uri2: str, query: str, reason: str = "",
-                         strategy: str = "llm_review", weight: float = 1.0) -> None:
+                         strategy: str = "llm_review", weight: float = 1.0) -> bool:
+        total_start = time.time()
         parent_dir = self._uri_to_parent_path(uri1)
         os.makedirs(parent_dir, exist_ok=True)
         relations_filename = ".relations.jsonl" if strategy == "blind" else f".relations_{strategy}.jsonl"
         jsonl_path = os.path.join(parent_dir, relations_filename)
 
         question_id = ""
+        question_ms = 0.0
         if query:
+            question_start = time.time()
             ref_store = ReferenceStore(parent_dir)
             embedder = _get_embedder()
             question_id = ref_store.get_or_create(query, embedder=embedder)
+            question_ms = (time.time() - question_start) * 1000
 
         key = (uri1, uri2, question_id)
         existing = set()
+        existing_records = 0
+        existing_file_bytes = os.path.getsize(jsonl_path) if os.path.exists(jsonl_path) else 0
+        scan_start = time.time()
         if os.path.exists(jsonl_path):
             with open(jsonl_path, "r", encoding="utf-8") as f:
                 for line in f:
@@ -588,14 +672,35 @@ class VikingClient:
                     try:
                         rec = json.loads(line)
                         existing.add((rec.get("uri1", ""), rec.get("uri2", ""), rec.get("question_id", "")))
+                        existing_records += 1
                     except json.JSONDecodeError:
                         continue
+        scan_ms = (time.time() - scan_start) * 1000
         if key in existing:
-            return
+            total_ms = (time.time() - total_start) * 1000
+            log_fn = logger.info if total_ms >= 100 else logger.debug
+            log_fn(
+                f"[RelationsAppend][PROFILE] status=exists uri1={uri1} | uri2={uri2} | "
+                f"strategy={strategy}, question_ms={question_ms:.0f}, "
+                f"scan_ms={scan_ms:.0f}, write_ms=0, total_ms={total_ms:.0f}, "
+                f"existing_records={existing_records}, file_bytes={existing_file_bytes}"
+            )
+            return False
 
         record = {"uri1": uri1, "uri2": uri2, "question_id": question_id, "reason": reason, "weight": weight}
+        write_start = time.time()
         with open(jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        write_ms = (time.time() - write_start) * 1000
+        total_ms = (time.time() - total_start) * 1000
+        log_fn = logger.info if total_ms >= 100 else logger.debug
+        log_fn(
+            f"[RelationsAppend][PROFILE] status=created uri1={uri1} | uri2={uri2} | "
+            f"strategy={strategy}, question_ms={question_ms:.0f}, "
+            f"scan_ms={scan_ms:.0f}, write_ms={write_ms:.0f}, total_ms={total_ms:.0f}, "
+            f"existing_records={existing_records}, file_bytes={existing_file_bytes}"
+        )
+        return True
 
     async def glob(self, pattern: str, uri: Optional[str] = None) -> Dict[str, Any]:
         """通过 glob 模式匹配文件"""

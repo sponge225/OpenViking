@@ -3,10 +3,18 @@ import json
 import os
 from typing import List, Dict, Any
 
-from .base import BaseAdapter, StandardDoc, StandardSample, StandardQA, ASSESSMENT_INSTRUCTION
+from .base import (
+    BaseAdapter,
+    EVIDENCE_BASED_ASSESSMENT_INSTRUCTION,
+    StandardDoc,
+    StandardSample,
+    StandardQA,
+)
 
 
-# CATEGORY_INSTRUCTIONS kept for reference, not used currently
+ASSESSMENT_INSTRUCTION = EVIDENCE_BASED_ASSESSMENT_INSTRUCTION
+
+
 CATEGORY_INSTRUCTIONS = {
     "1": """Extract the exact factual answer from the conversation.
 - Use the exact words from the context when possible
@@ -157,9 +165,28 @@ class LocomoAdapter(BaseAdapter):
 
     def build_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
         category = str(qa.category)
-        context_text = self._format_context_blocks(context_blocks)
+        context_text = "\n\n".join(context_blocks)
         
-        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n---\n\nQuestion: {qa.question}"
+        category_instruction = CATEGORY_INSTRUCTIONS.get(category, "")
+        
+        if category_instruction:
+            full_prompt = f"""{context_text}
+
+{ASSESSMENT_INSTRUCTION}
+
+---
+{category_instruction}
+
+Question: {qa.question}"""
+        else:
+            full_prompt = f"""{context_text}
+
+{ASSESSMENT_INSTRUCTION}
+
+Based on the conversation above, answer the following question.
+Use ONLY the provided context. Do NOT invent any information.
+
+Question: {qa.question}"""
 
         meta = {"category": category}
         return full_prompt, meta

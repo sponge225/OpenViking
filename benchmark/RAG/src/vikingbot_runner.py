@@ -106,6 +106,81 @@ def _load_server_url_and_key(ov_conf_path: str) -> tuple[str, str]:
     return f"http://{host}:{port}", api_key
 
 
+def _load_conf_workspace_and_port(ov_conf_path: str) -> tuple[str, int | None]:
+    try:
+        with open(ov_conf_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return "", None
+    storage = data.get("storage", {}) if isinstance(data, dict) else {}
+    server = data.get("server", {}) if isinstance(data, dict) else {}
+    workspace = os.path.realpath(storage.get("workspace", "") or "")
+    port = server.get("port")
+    try:
+        port = int(port) if port is not None else None
+    except (TypeError, ValueError):
+        port = None
+    return workspace, port
+
+
+def _iter_openviking_server_processes() -> list[tuple[int, str]]:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "openviking-server"],
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+
+    processes = []
+    for raw_pid in result.stdout.split():
+        try:
+            pid = int(raw_pid)
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline = f.read().decode("utf-8", errors="replace").replace("\x00", " ").strip()
+            processes.append((pid, cmdline))
+        except Exception:
+            continue
+    return processes
+
+
+def _extract_config_path_from_cmdline(cmdline: str) -> str:
+    parts = cmdline.split()
+    for i, part in enumerate(parts):
+        if part == "--config" and i + 1 < len(parts):
+            return parts[i + 1]
+    return ""
+
+
+def _find_openviking_servers_on_port(port: int) -> list[tuple[int, str, str]]:
+    matches = []
+    for pid, cmdline in _iter_openviking_server_processes():
+        conf_path = _extract_config_path_from_cmdline(cmdline)
+        if not conf_path:
+            continue
+        workspace, conf_port = _load_conf_workspace_and_port(conf_path)
+        if conf_port == port:
+            matches.append((pid, conf_path, workspace))
+    return matches
+
+
+def _terminate_openviking_servers_on_port(port: int, reason: str) -> None:
+    for pid, conf_path, workspace in _find_openviking_servers_on_port(port):
+        logger.warning(
+            f"Stopping stale openviking-server PID {pid} on port {port}: {reason}; "
+            f"config={conf_path}, workspace={workspace}"
+        )
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except Exception as e:
+            logger.warning(f"Failed to terminate openviking-server PID {pid}: {e}")
+
+
 def _stop_openviking_server() -> None:
     global _OPENVIKING_SERVER_PROCESS, _CURRENT_OV_CONF_PATH, _OPENVIKING_SERVER_LOG_FH
     proc = _OPENVIKING_SERVER_PROCESS
@@ -217,6 +292,7 @@ def _ensure_openviking_server(ov_conf_path: str) -> None:
     with _SERVER_LOCK:
         server_url, api_key = _load_server_url_and_key(ov_conf_path)
         health_url = f"{server_url}/health"
+        desired_workspace, _desired_port = _load_conf_workspace_and_port(ov_conf_path)
 
         if (_CURRENT_OV_CONF_PATH == ov_conf_path and
             _OPENVIKING_SERVER_PROCESS and
@@ -225,12 +301,29 @@ def _ensure_openviking_server(ov_conf_path: str) -> None:
             return
 
         # Check if another process (e.g. VikingStoreWrapper) already has a healthy
-        # server on this port. If so, reuse it without starting our own.
+        # server on this port. Reuse it only if it points at the same workspace.
+        # Relation-perquery runs switch stores on the same port; blindly reusing a
+        # healthy server would keep querying the previous per-query store.
         if _healthcheck(health_url):
-            logger.info(f"Reusing existing healthy server at {server_url}")
-            _CURRENT_OV_CONF_PATH = ov_conf_path
-            _OPENVIKING_SERVER_PROCESS = None
-            return
+            host = server_url.split("//")[1].split(":")[0]
+            port = int(server_url.split(":")[-1].split("/")[0])
+            servers = _find_openviking_servers_on_port(port)
+            matching_server = any(
+                workspace and os.path.realpath(workspace) == desired_workspace
+                for _pid, _conf_path, workspace in servers
+            )
+            if matching_server:
+                logger.info(f"Reusing existing healthy server at {server_url}")
+                _CURRENT_OV_CONF_PATH = ov_conf_path
+                _OPENVIKING_SERVER_PROCESS = None
+                return
+            _terminate_openviking_servers_on_port(
+                port,
+                f"workspace mismatch, desired={desired_workspace}",
+            )
+            if _OPENVIKING_SERVER_PROCESS is not None:
+                _stop_openviking_server()
+            _wait_for_port_release(host, port)
 
         if _OPENVIKING_SERVER_PROCESS and _OPENVIKING_SERVER_PROCESS.poll() is None:
             logger.warning("OV server healthcheck failed after retries, restarting server")
@@ -312,8 +405,8 @@ def _build_vikingbot_env(
     embedding_config: dict = None,
     link_strategy: str = "llm_review",
     enable_reasoning: bool = True,
-    relation_keyword_threshold: float = 0.7,
-    relation_vector_threshold: float = 0.7,
+    relations_topk: int = 0,
+    relations_similarity_threshold: float | None = None,
 ) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
@@ -324,8 +417,9 @@ def _build_vikingbot_env(
     env["VIKINGBOT_ENABLE_LINKING"] = "1" if enable_linking else "0"
     env["VIKINGBOT_ENABLE_REASONING"] = "1" if enable_reasoning else "0"
     env["VIKINGBOT_LINK_STRATEGY"] = link_strategy
-    env["VIKINGBOT_RELATION_KEYWORD_THRESHOLD"] = str(float(relation_keyword_threshold))
-    env["VIKINGBOT_RELATION_VECTOR_THRESHOLD"] = str(float(relation_vector_threshold))
+    env["VIKINGBOT_RELATIONS_TOPK"] = str(int(relations_topk or 0))
+    if relations_similarity_threshold is not None:
+        env["VIKINGBOT_RELATIONS_SIMILARITY_THRESHOLD"] = str(relations_similarity_threshold)
     if embedding_config:
         raw_key = embedding_config.get("api_key", "")
         resolved_key = os.path.expandvars(raw_key) if raw_key else ""
@@ -353,7 +447,7 @@ def _build_vikingbot_env(
 
 
 class VikingBotRunner:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], ov_conf_path: str = None):
         self.config = config
         self.vikingbot_config = config.get('vikingbot', {})
         self.max_iterations = self.vikingbot_config.get('max_iterations', 50)
@@ -363,11 +457,18 @@ class VikingBotRunner:
         self.enable_linking = self.vikingbot_config.get('enable_linking', False)
         self.link_strategy = self.vikingbot_config.get('link_strategy', 'llm_review')
         self.enable_reasoning = self.vikingbot_config.get('enable_reasoning', True)
-        self.relation_keyword_threshold = self.vikingbot_config.get('relation_keyword_threshold', 0.7)
-        self.relation_vector_threshold = self.vikingbot_config.get('relation_vector_threshold', 0.7)
+        self.relations_topk = self.vikingbot_config.get(
+            'relations_topk',
+            config.get('execution', {}).get('relations_topk', 0),
+        )
+        self.relations_similarity_threshold = self.vikingbot_config.get(
+            'relations_similarity_threshold',
+            config.get('execution', {}).get('relations_similarity_threshold'),
+        )
         self.vector_store_path = config.get('paths', {}).get('vector_store')
         self.llm_config = config.get('llm', None)
         self.server_port = config.get('execution', {}).get('server_port', None)
+        self.ov_conf_path = ov_conf_path or config.get('_ov_conf_path') or _OV_CONF_PATH
 
     def generate_answer(
         self,
@@ -380,10 +481,10 @@ class VikingBotRunner:
         start_time = time.time()
 
         try:
-            ov_conf_path = _OV_CONF_PATH
+            ov_conf_path = self.ov_conf_path
             temp_conf_path = None
             if self.vector_store_path:
-                temp_conf_path = _generate_temp_ov_conf(_OV_CONF_PATH, self.vector_store_path, search_limit=self.search_limit, llm_config=self.llm_config, server_port=self.server_port)
+                temp_conf_path = _generate_temp_ov_conf(self.ov_conf_path, self.vector_store_path, search_limit=self.search_limit, llm_config=self.llm_config, server_port=self.server_port)
                 ov_conf_path = temp_conf_path
                 logger.info(f"Using vector store: {self.vector_store_path}")
 
@@ -415,8 +516,8 @@ class VikingBotRunner:
                 embedding_config=self.config.get('embedding'),
                 link_strategy=self.link_strategy,
                 enable_reasoning=self.enable_reasoning,
-                relation_keyword_threshold=self.relation_keyword_threshold,
-                relation_vector_threshold=self.relation_vector_threshold,
+                relations_topk=self.relations_topk,
+                relations_similarity_threshold=self.relations_similarity_threshold,
             )
 
             # Write bot JSON output to a temp file (avoids stdout escape issues)
@@ -530,6 +631,7 @@ def run_vikingbot_query(
     config: Dict[str, Any],
     session_id: Optional[str] = None,
     allowed_target_uris: Optional[List[str]] = None,
+    ov_conf_path: str = None,
 ) -> Dict[str, Any]:
-    runner = VikingBotRunner(config)
+    runner = VikingBotRunner(config, ov_conf_path=ov_conf_path)
     return runner.generate_answer(question, session_id, allowed_target_uris=allowed_target_uris)

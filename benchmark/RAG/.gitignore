@@ -20,6 +20,7 @@ Output_split_2/
 Output_double_old/
 Output_half_old/
 output/
+Output*/
 *.sh
 
 # Python

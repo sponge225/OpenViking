@@ -92,12 +92,19 @@ def main():
     print(f"[Init] Resolving paths relative to Project Root: {PROJECT_ROOT}")
     dataset_name = config.get('dataset_name', 'UnknownDataset')
     retrieval_topk = config.get('execution', {}).get('retrieval_topk', 5)
+    mode_for_paths = config.get('execution', {}).get('mode')
+    if mode_for_paths == "ov_fallback_bot_relations":
+        path_relations_topk = config.get('execution', {}).get('relations_topk', 0)
+    else:
+        path_relations_topk = config.get('vikingbot', {}).get('relations_topk', '')
     
     format_vars = {
         'dataset_name': dataset_name,
         'retrieval_topk': retrieval_topk,
         'search_limit': config.get('vikingbot', {}).get('search_limit', ''),
         'max_iterations': config.get('vikingbot', {}).get('max_iterations', ''),
+        'relations_topk': path_relations_topk,
+        'relations_similarity_threshold': config.get('vikingbot', {}).get('relations_similarity_threshold', ''),
     }
     
     path_keys = ['dataset_path', 'output_dir', 'vector_store', 'log_file', 'doc_output_dir']
@@ -194,14 +201,22 @@ def main():
                         model=embedding_cfg.get('model', 'doubao-embedding-vision-250615'),
                     )
                 link_strategy = config.get('execution', {}).get('link_strategy', 'llm_review')
+                relations_topk = config.get('execution', {}).get('relations_topk', 0)
+                relations_similarity_threshold = config.get('execution', {}).get('relations_similarity_threshold')
                 vector_store = VikingStoreHTTPWithRelations(
                     server_url=server_url,
                     api_key=api_key,
                     store_path=vector_store_path,
                     embedder=embedder,
                     strategy=link_strategy,
+                    relations_topk=relations_topk,
+                    similarity_threshold=relations_similarity_threshold,
                 )
-                logger.info(f"Fallback mode ({mode}): using HTTP wrapper with relations at {server_url}")
+                logger.info(
+                    f"Fallback mode ({mode}): using HTTP wrapper with relations at {server_url} "
+                    f"(relations_topk={relations_topk}, "
+                    f"relations_similarity_threshold={relations_similarity_threshold})"
+                )
             else:
                 vector_store = VikingStoreHTTPWrapper(server_url=server_url, api_key=api_key)
                 logger.info(f"Fallback mode ({mode}): using HTTP wrapper at {server_url}")
@@ -209,10 +224,9 @@ def main():
             use_relations = config.get('execution', {}).get('use_relations', False)
             if use_relations:
                 relations_topk = config['execution'].get('relations_topk', 0)
+                relations_similarity_threshold = config['execution'].get('relations_similarity_threshold')
                 use_query_expansion = config['execution'].get('use_query_expansion', False)
                 link_strategy = config['execution'].get('link_strategy', 'llm_review')
-                relation_keyword_threshold = config['execution'].get('relation_keyword_threshold', 0.7)
-                relation_vector_threshold = config['execution'].get('relation_vector_threshold', 0.7)
 
                 embedder = None
                 embedding_cfg = config.get('embedding', {})
@@ -236,14 +250,13 @@ def main():
                     llm=llm_client if use_query_expansion else None,
                     embedder=embedder,
                     strategy=link_strategy,
-                    relation_keyword_threshold=relation_keyword_threshold,
-                    relation_vector_threshold=relation_vector_threshold,
+                    similarity_threshold=relations_similarity_threshold,
                 )
                 logger.info(
                     "Using VikingStoreWithRelations "
                     f"(relations_topk={relations_topk}, query_expansion={use_query_expansion}, "
-                    f"link_strategy={link_strategy}, relation_keyword_threshold={relation_keyword_threshold}, "
-                    f"relation_vector_threshold={relation_vector_threshold})"
+                    f"link_strategy={link_strategy}, "
+                    f"relations_similarity_threshold={relations_similarity_threshold})"
                 )
             else:
                 vector_store = VikingStoreWrapper(store_path=config['paths']['vector_store'])

@@ -16,10 +16,20 @@ import sys
 
 sys.path.append(str(Path(__file__).parent))
 
-from base import BaseAdapter, StandardDoc, StandardSample, StandardQA, ASSESSMENT_INSTRUCTION
+from base import (
+    BaseAdapter,
+    EVIDENCE_BASED_ASSESSMENT_INSTRUCTION,
+    StandardDoc,
+    StandardSample,
+    StandardQA,
+)
 
 QA_PROMPT = """Based on the financial document excerpts above, answer the following question accurately and concisely.
-If the answer involves a numerical value, include the unit (e.g., USD millions, %, etc.)."""
+If the answer involves a numerical value, include the unit (e.g., USD millions, %, etc.).
+
+Question: {}"""
+
+ASSESSMENT_INSTRUCTION = EVIDENCE_BASED_ASSESSMENT_INSTRUCTION
 
 
 class FinanceBenchAdapter(BaseAdapter):
@@ -115,8 +125,8 @@ class FinanceBenchAdapter(BaseAdapter):
         return samples
 
     def build_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
-        context_text = self._format_context_blocks(context_blocks)
-        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n{QA_PROMPT}\n\n---\n\nQuestion: {qa.question}"
+        context_text = "\n\n".join(context_blocks)
+        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n{QA_PROMPT.format(qa.question)}"
         meta = {
             "question_type": qa.category,
             "financebench_id": qa.metadata.get("financebench_id"),

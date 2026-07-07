@@ -25,12 +25,18 @@ import json
 import os
 from typing import List, Dict, Any
 
-from .base import BaseAdapter, StandardDoc, StandardSample, StandardQA, ASSESSMENT_INSTRUCTION
+from .base import (
+    BaseAdapter,
+    EVIDENCE_BASED_ASSESSMENT_INSTRUCTION,
+    StandardDoc,
+    StandardSample,
+    StandardQA,
+)
 
-# Specific instructions for different answer types (kept for reference, not used currently)
+# Specific instructions for different answer types
 CATEGORY_INSTRUCTIONS = {
     "extractive": """Extract the exact answer from the paper.
-- Use EXACT wording from context
+- Use EXACT wording from the context
 - Do NOT rephrase or add explanation
 - Provide concise, direct answer""",
     
@@ -46,6 +52,9 @@ CATEGORY_INSTRUCTIONS = {
 - Use ONLY info from context
 - Do NOT invent information"""
 }
+
+# Rule for when answer cannot be found
+ASSESSMENT_INSTRUCTION = EVIDENCE_BASED_ASSESSMENT_INSTRUCTION
 
 
 class QasperAdapter(BaseAdapter):
@@ -365,13 +374,31 @@ class QasperAdapter(BaseAdapter):
         return "\n".join(md_lines)
 
     def build_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
-        context_text = self._format_context_blocks(context_blocks)
+        context_text = "\n\n".join(context_blocks) if context_blocks else "No relevant context found."
         
-        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n---\n\nQuestion: {qa.question}"
+        answer_types = qa.metadata.get("answer_types", [])
+        primary_type = answer_types[0] if answer_types else None
+        
+        category_instruction = CATEGORY_INSTRUCTIONS.get(primary_type, "")
+        
+        if category_instruction:
+            full_prompt = f"""{context_text}
+
+{category_instruction}
+
+{ASSESSMENT_INSTRUCTION}
+
+Question: {qa.question}"""
+        else:
+            full_prompt = f"""{context_text}
+
+{ASSESSMENT_INSTRUCTION}
+
+Question: {qa.question}"""
 
         meta = {
             "question_id": qa.metadata.get("question_id", ""),
-            "answer_types": qa.metadata.get("answer_types", [])
+            "answer_types": answer_types
         }
         return full_prompt, meta
 

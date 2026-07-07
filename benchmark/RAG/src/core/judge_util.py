@@ -120,7 +120,10 @@ Respond ONLY with a JSON object: {{"score": 0 to 4, "reasoning": "string"}}
     judge_output_tokens = 0
     t_start = time.time()
 
-    max_retries = 10
+    max_retries = 4
+    base_retry_delay = 5.0
+    max_retry_delay = 30.0
+    content = ""
     for attempt in range(max_retries):
         try:
             resp = llm_client.invoke(messages)
@@ -140,7 +143,12 @@ Respond ONLY with a JSON object: {{"score": 0 to 4, "reasoning": "string"}}
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "RateLimit" in err_str or "TooManyRequests" in err_str or "TPM" in err_str:
-                delay = 5.0 * (2 ** min(attempt, 6))
+                if attempt >= max_retries - 1:
+                    raise RuntimeError(
+                        f"Judge rate-limited after {max_retries} attempts. Last error: {err_str}"
+                    ) from e
+
+                delay = min(base_retry_delay * (2 ** attempt), max_retry_delay)
                 print(f"[Judge] Rate limited, retry {attempt + 1}/{max_retries} after {delay:.1f}s")
                 time.sleep(delay)
                 continue

@@ -18,9 +18,14 @@ import sys
 
 sys.path.append(str(Path(__file__).parent))
 
-from base import BaseAdapter, StandardDoc, StandardSample, StandardQA, ASSESSMENT_INSTRUCTION
+from base import (
+    BaseAdapter,
+    EVIDENCE_BASED_ASSESSMENT_INSTRUCTION,
+    StandardDoc,
+    StandardSample,
+    StandardQA,
+)
 
-# CATEGORY_INSTRUCTIONS kept for reference, not used currently
 CATEGORY_INSTRUCTIONS = {
     "bridge": """Answer the bridge-type question using information from the context.
 - Use facts from the context as the basis for reasoning
@@ -32,6 +37,8 @@ CATEGORY_INSTRUCTIONS = {
 - Highlight similarities and differences clearly
 - Draw conclusions based on the evidence"""
 }
+
+ASSESSMENT_INSTRUCTION = EVIDENCE_BASED_ASSESSMENT_INSTRUCTION
 
 
 class HotpotQAAdapter(BaseAdapter):
@@ -199,9 +206,25 @@ class HotpotQAAdapter(BaseAdapter):
         return evidence
 
     def build_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
-        context_text = self._format_context_blocks(context_blocks)
+        context_text = "\n\n".join(context_blocks)
         
-        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n---\n\nQuestion: {qa.question}"
+        category = qa.category
+        category_instruction = CATEGORY_INSTRUCTIONS.get(category, "")
+        
+        if category_instruction:
+            full_prompt = f"""{context_text}
+
+{category_instruction}
+
+{ASSESSMENT_INSTRUCTION}
+
+Question: {qa.question}"""
+        else:
+            full_prompt = f"""{context_text}
+
+{ASSESSMENT_INSTRUCTION}
+
+Question: {qa.question}"""
 
         meta = {
             "id": qa.metadata.get("id", ""),

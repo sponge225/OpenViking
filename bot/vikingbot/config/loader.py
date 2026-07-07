@@ -107,12 +107,31 @@ def load_config() -> Config:
             _merge_ov_server_config(bot_server_data, ov_server_data)
             bot_data["ov_server"] = bot_server_data
 
+            _apply_env_overrides(bot_data)
+
             return Config.model_validate(bot_data)
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {path}: {e}")
             print("Using default configuration.")
 
     return Config()
+
+
+def _apply_env_overrides(bot_data: dict) -> None:
+    max_tool_iterations = os.environ.get("NANOBOT_AGENTS__MAX_TOOL_ITERATIONS")
+    if max_tool_iterations is None:
+        return
+
+    try:
+        value = int(max_tool_iterations)
+    except ValueError:
+        logger.warning(
+            f"Ignoring invalid NANOBOT_AGENTS__MAX_TOOL_ITERATIONS={max_tool_iterations!r}"
+        )
+        return
+
+    agents = bot_data.setdefault("agents", {})
+    agents["max_tool_iterations"] = value
 
 
 def _merge_vlm_model_config(bot_data: dict, vlm_data: dict) -> None:

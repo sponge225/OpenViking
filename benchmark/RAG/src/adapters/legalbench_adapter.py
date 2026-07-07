@@ -4,7 +4,13 @@ import re
 import unicodedata
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from .base import BaseAdapter, StandardDoc, StandardSample, StandardQA
+from .base import (
+    BaseAdapter,
+    EVIDENCE_BASED_ASSESSMENT_INSTRUCTION,
+    StandardDoc,
+    StandardSample,
+    StandardQA,
+)
 
 # ---------
 # 支持的子集
@@ -104,14 +110,12 @@ def convert_legal_to_md(content: str, title: str = "") -> str:
 # Prompt 模板
 # ----------
 
-QA_PROMPT = """Based on the following legal document excerpts, answer the question concisely and accurately.
+ASSESSMENT_INSTRUCTION = EVIDENCE_BASED_ASSESSMENT_INSTRUCTION
 
+LEGAL_INSTRUCTION = """For legal questions:
 - Quote or closely paraphrase the relevant contract language when possible.
 - If the answer involves a date, party name, or specific term, state it exactly.
-- If the context contains no information relevant to the question, write "Not mentioned".
-
-Question: {question}
-Answer:"""
+- If the context contains no information relevant to the question, set "answer" to "Not mentioned" following the JSON format below."""
 
 
 class LegalBenchAdapter(BaseAdapter):
@@ -126,6 +130,9 @@ class LegalBenchAdapter(BaseAdapter):
         super().__init__(raw_file_path)
         self._corpus_root: Optional[str] = None
         self._benchmark_files: list[str] = []
+        self._path_resolution_cache: dict[str, Optional[str]] = {}
+        self._dir_filename_index: dict[str, dict[str, str]] = {}
+        self._warned_missing_paths: set[str] = set()
         self._resolve_paths()
 
     def _resolve_paths(self):
@@ -153,6 +160,72 @@ class LegalBenchAdapter(BaseAdapter):
                 f"raw_file_path must be a directory or a .json benchmark file, got: {self.raw_file_path}"
             )
 
+    def _canonical_filename_key(self, name: str) -> str:
+        name = unicodedata.normalize("NFKC", name)
+        name = name.replace("||", "__")
+        name = re.sub(r'[<>:"/\\|?*]', "_", name)
+        name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+        name = re.sub(r"\s+", " ", name).strip(" .")
+        return name.casefold()
+
+    def _filename_index_for_dir(self, dir_path: Path) -> dict[str, str]:
+        key = str(dir_path)
+        if key in self._dir_filename_index:
+            return self._dir_filename_index[key]
+
+        index: dict[str, str] = {}
+        if dir_path.is_dir():
+            for child in dir_path.iterdir():
+                if child.is_file():
+                    index.setdefault(self._canonical_filename_key(child.name), str(child))
+        self._dir_filename_index[key] = index
+        return index
+
+    def _resolve_corpus_path(self, rel_path: str) -> Optional[str]:
+        if rel_path in self._path_resolution_cache:
+            return self._path_resolution_cache[rel_path]
+
+        direct_path = Path(self._corpus_root) / rel_path
+        if direct_path.exists():
+            resolved = str(direct_path)
+            self._path_resolution_cache[rel_path] = resolved
+            return resolved
+
+        rel_posix = rel_path.replace("\\", "/")
+        rel_dir, filename = os.path.split(rel_posix)
+        dir_path = Path(self._corpus_root) / Path(rel_dir.replace("/", os.sep))
+
+        candidates = [
+            filename,
+            filename.replace("||", "__"),
+            re.sub(r'[<>:"/\\|?*]', "_", filename.replace("||", "__")),
+        ]
+        for candidate in dict.fromkeys(candidates):
+            candidate_path = dir_path / candidate
+            if candidate_path.exists():
+                resolved = str(candidate_path)
+                self._path_resolution_cache[rel_path] = resolved
+                self.logger.info(f"[LegalBenchAdapter] Resolved corpus path: {rel_path} -> {candidate}")
+                return resolved
+
+        index = self._filename_index_for_dir(dir_path)
+        resolved = index.get(self._canonical_filename_key(filename))
+        if resolved:
+            self._path_resolution_cache[rel_path] = resolved
+            self.logger.info(
+                f"[LegalBenchAdapter] Resolved corpus path: {rel_path} -> {Path(resolved).name}"
+            )
+            return resolved
+
+        self._path_resolution_cache[rel_path] = None
+        return None
+
+    def _warn_missing_corpus(self, rel_path: str) -> None:
+        if rel_path in self._warned_missing_paths:
+            return
+        self._warned_missing_paths.add(rel_path)
+        self.logger.warning(f"Corpus file not found: {os.path.join(self._corpus_root, rel_path)}")
+
     def data_prepare(self, doc_dir: str) -> List[StandardDoc]:
         """
         遍历所有 benchmark JSON，收集引用的 corpus 文件路径，
@@ -160,7 +233,7 @@ class LegalBenchAdapter(BaseAdapter):
 
         返回值：每个唯一原始文件对应一个 StandardDoc
             sample_id 为 corpus 相对路径 (如 "cuad/foo.txt")，
-            doc_paths 为转换后的 .md 文件路径列表 (单元素) 。
+            doc_path 为转换后的 .md 文件路径。
         """
         os.makedirs(doc_dir, exist_ok=True)
         seen: dict[str, str] = {}  # relative_path -> md_path
@@ -174,9 +247,9 @@ class LegalBenchAdapter(BaseAdapter):
                     if rel_path in seen:
                         continue
 
-                    txt_path = os.path.join(self._corpus_root, rel_path)
-                    if not os.path.exists(txt_path):
-                        self.logger.warning(f"Corpus file not found: {txt_path}")
+                    txt_path = self._resolve_corpus_path(rel_path)
+                    if not txt_path:
+                        self._warn_missing_corpus(rel_path)
                         continue
 
                     # 生成不冲突的 md 文件名
@@ -202,7 +275,7 @@ class LegalBenchAdapter(BaseAdapter):
                         raise
 
         res = [
-            StandardDoc(sample_id=rel_path, doc_paths=[md_path])
+            StandardDoc(sample_id=rel_path, doc_path=md_path)
             for rel_path, md_path in seen.items()
         ]
         self.logger.info(f"[LegalBenchAdapter] data_prepare: {len(res)} documents written to {doc_dir}")
@@ -237,6 +310,20 @@ class LegalBenchAdapter(BaseAdapter):
                 snippets = test["snippets"]
 
                 if not snippets:
+                    continue
+
+                missing_files = [
+                    s["file_path"]
+                    for s in snippets
+                    if not self._resolve_corpus_path(s["file_path"])
+                ]
+                if missing_files:
+                    for rel_path in missing_files:
+                        self._warn_missing_corpus(rel_path)
+                    self.logger.warning(
+                        f"[LegalBenchAdapter] Skipping sample because referenced corpus file is missing: "
+                        f"{query[:160]}"
+                    )
                     continue
 
                 # 所有 snippet 的答案文本作为 gold_answers
@@ -287,7 +374,11 @@ class LegalBenchAdapter(BaseAdapter):
                     evidence.append(answer)
                 continue
 
-            txt_path = os.path.join(self._corpus_root, rel_path)
+            txt_path = self._resolve_corpus_path(rel_path)
+            if not txt_path:
+                if answer:
+                    evidence.append(answer)
+                continue
             try:
                 with open(txt_path, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
@@ -306,8 +397,18 @@ class LegalBenchAdapter(BaseAdapter):
 
     def build_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
         context_text = "\n\n---\n\n".join(context_blocks)
-        full_prompt = f"{context_text}\n\n{QA_PROMPT.format(question=qa.question)}"
-        return full_prompt, {}
+        full_prompt = (
+            f"{context_text}\n\n"
+            f"{LEGAL_INSTRUCTION}\n\n"
+            f"{ASSESSMENT_INSTRUCTION}\n\n"
+            f"Question: {qa.question}"
+        )
+        meta = {
+            "subset": qa.metadata.get("subset", ""),
+            "global_idx": qa.metadata.get("global_idx"),
+            "file_paths": qa.metadata.get("file_paths", []),
+        }
+        return full_prompt, meta
 
     def post_process_answer(self, qa: StandardQA, raw_answer: str, meta: Dict[str, Any]) -> str:
         return raw_answer.strip()
