@@ -117,6 +117,20 @@ LEGAL_INSTRUCTION = """For legal questions:
 - If the answer involves a date, party name, or specific term, state it exactly.
 - If the context contains no information relevant to the question, set "answer" to "Not mentioned" following the JSON format below."""
 
+LEGAL_EVIDENCE_SELECTION_INSTRUCTION = """For LegalBench legal/contract questions:
+- Prefer exact contract language over summaries.
+- Select evidence that matches the named parties, agreement title, requested term, section title, section number, and surrounding clause text.
+- For definition questions, select the definition text and important exclusions or carve-outs when they are needed to answer completely.
+- For clause-location questions, select both the section/location and enough nearby clause text to verify it is the requested clause.
+- For information-about questions, select the operative conditions, exceptions, limitations, triggers, or remedies, not just a heading."""
+
+LEGAL_EVIDENCE_SUFFICIENCY_INSTRUCTION = """For LegalBench legal/contract questions:
+- Evidence is sufficient only when it can support the contract-specific answer for the named parties/agreement.
+- For definition questions, the selected evidence must include the core definition and any material exclusions, carve-outs, or party-specific variants needed by the question.
+- For clause-location questions, the selected evidence must identify the requested clause or section and include enough text to verify that it is the right clause.
+- For information-about questions, the selected evidence must cover the main operative rule and important conditions, exceptions, limitations, triggers, or remedies.
+- If selected evidence comes from a similar but different clause, different agreement, or cannot be tied to the named parties/agreement, mark it insufficient."""
+
 
 class LegalBenchAdapter(BaseAdapter):
     """
@@ -412,3 +426,9 @@ class LegalBenchAdapter(BaseAdapter):
 
     def post_process_answer(self, qa: StandardQA, raw_answer: str, meta: Dict[str, Any]) -> str:
         return raw_answer.strip()
+
+    def evidence_selection_instruction(self, qa: StandardQA) -> str:
+        return LEGAL_EVIDENCE_SELECTION_INSTRUCTION
+
+    def evidence_sufficiency_instruction(self, qa: StandardQA) -> str:
+        return LEGAL_EVIDENCE_SUFFICIENCY_INSTRUCTION

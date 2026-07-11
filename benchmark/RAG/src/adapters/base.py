@@ -11,29 +11,46 @@ from core.logger import get_logger
 
 EVIDENCE_BASED_ASSESSMENT_INSTRUCTION = """IMPORTANT: Answer strictly based on the provided context above. Do NOT use external knowledge or information not present in the context.
 
-Before deciding, audit the provided context against the question. Provide a concise evidence analysis that can be checked:
-- Point 1: Quote the exact sentence(s) from the context that directly answer the question, focusing on content that matches the question's key terms.
-- Point 2: Identify any additional evidence, constraints, dates, entities, numbers, or multi-hop links needed for the answer.
-- Point 3: State whether any key information is missing or conflicting.
+Before answering, perform a strict sufficiency audit. Context relevance is not enough: the answer is sufficient only when every required part of the question is directly supported by the provided context.
 
-Make a routing decision:
-- Set "action" to "answer" only when the provided context directly supports the final answer.
-- Set "action" to "fallback" when the context is insufficient, ambiguous, missing key facts, conflicting, only weakly related, or would require guessing. In that case, set "sufficient" to false, list the missing information, and set "answer" to "Not mentioned". Do NOT guess or fabricate.
+Audit steps:
+1. Question requirements: identify the exact answer type requested and every constraint in the question, such as entity, version, date, count, scope, comparison target, yes/no condition, or multi-hop link.
+2. Direct support: for each required part, quote the exact sentence(s) from the context that support it. If support requires combining multiple quoted facts, explain that combination briefly.
+3. Unsupported or inferred parts: list any required part that is missing, only weakly related, only implied, contradicted, ambiguous, from a similar-but-different entity/scope/version, or would require guessing.
 
-If the context is SUFFICIENT, set "action" to "answer", set "sufficient" to true, and provide a complete answer in the "answer" field. Include all relevant details (dates, ranges, names) rather than oversimplifying.
+Routing decision:
+- Set "action" to "answer" only when every required part is directly supported by quoted context.
+- Set "action" to "fallback" when any required part is missing, weakly supported, inferred, ambiguous, conflicting, or only supported by related-but-not-exact context. In that case, set "sufficient" to false, list the missing or unsupported parts in "missing_info", and set "answer" to "Not mentioned". Do NOT guess or fabricate.
+- If the question requires a number, date, version, name, location, yes/no conclusion, or comparison result, that exact value or conclusion must be directly supported by the quoted context.
+
+If the context is SUFFICIENT, set "action" to "answer", set "sufficient" to true, and provide a complete answer in the "answer" field. Include all relevant details rather than oversimplifying.
 
 Respond ONLY as a JSON object in the following format:
 {
   "action": "answer" | "fallback",
   "sufficient": true/false,
   "evidence_analysis": [
-    "Point 1: [Quote] ...",
-    "Point 2: ...",
-    "Point 3: ..."
+    "Question requirements: ...",
+    "Direct support: [Quote] ...",
+    "Unsupported or inferred parts: ..."
   ],
   "missing_info": [],
   "answer": "<final answer or Not mentioned>",
-  "reasoning": "<one short sentence summarizing why the answer is supported or why it is insufficient>"
+  "reasoning": "<one short sentence summarizing why every requirement is supported or what is unsupported>"
+}"""
+
+
+SIMPLE_CONTEXT_ANSWER_INSTRUCTION = """Answer the question using only the provided context.
+
+This is a simple baseline prompt. Do not perform a detailed evidence audit.
+If the context appears to contain enough relevant information, set "sufficient" to true and provide the answer.
+If the context does not contain enough relevant information, set "sufficient" to false and set "answer" to "Not mentioned".
+
+Return JSON only:
+{
+  "sufficient": true/false,
+  "answer": "<final answer or Not mentioned>",
+  "reasoning": "<one short sentence>"
 }"""
 
 
@@ -105,3 +122,28 @@ class BaseAdapter(ABC):
         Post-process raw LLM output (default implementation only strips whitespace).
         """
         return raw_answer.strip()
+
+    def build_simple_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
+        """
+        Build a deliberately simple QA prompt for baseline fallback providers.
+        This is separate from build_prompt so the main adapter prompt can keep
+        its richer dataset-specific behavior.
+        """
+        context_text = "\n\n".join(str(block) for block in context_blocks)
+        full_prompt = f"{context_text}\n\n{SIMPLE_CONTEXT_ANSWER_INSTRUCTION}\n\nQuestion: {qa.question}"
+        return full_prompt, {}
+
+    def evidence_selection_instruction(self, qa: StandardQA) -> str:
+        """
+        Optional dataset-specific guidance for selecting evidence from retrieved context.
+        Subclasses may override this to add domain constraints without changing the
+        shared pipeline prompt.
+        """
+        return ""
+
+    def evidence_sufficiency_instruction(self, qa: StandardQA) -> str:
+        """
+        Optional dataset-specific guidance for judging whether selected evidence is
+        sufficient to answer the question.
+        """
+        return ""

@@ -12,6 +12,7 @@ Apache Spark 为 PDF），QA 数据以 CSV 形式存储，无显式文档-问题
 
 import csv
 import os
+import re
 import shutil
 from typing import List, Dict, Any
 
@@ -23,6 +24,12 @@ Use the exact wording from the context whenever possible.
 Question: {}"""
 
 ASSESSMENT_INSTRUCTION = EVIDENCE_BASED_ASSESSMENT_INSTRUCTION
+
+VERSIONRAG_ABSENCE_QUESTION_INSTRUCTION = """VersionRAG-specific rule:
+- For yes/no questions asking whether something exists, is present, is mentioned, is supported, was introduced, or changed, a negative answer can be a valid final answer.
+- If the context covers the requested product/version/scope and supports the absence, non-existence, non-mention, unsupported status, or no-change conclusion, set "action" to "answer" and "sufficient" to true.
+- In that case, answer explicitly with "No, ..." or "No change is mentioned." rather than a bare "Not mentioned".
+- Use fallback only when the retrieved context is irrelevant, incomplete for the requested scope, or cannot support either a yes or no answer."""
 
 
 class VersionRAGAdapter(BaseAdapter):
@@ -150,9 +157,14 @@ class VersionRAGAdapter(BaseAdapter):
 
     def build_prompt(self, qa: StandardQA, context_blocks: List[str]) -> tuple[str, Dict[str, Any]]:
         context_text = "\n\n".join(context_blocks)
-        full_prompt = f"{context_text}\n\n{ASSESSMENT_INSTRUCTION}\n\n{QA_PROMPT.format(qa.question)}"
+        is_absence_question = self._is_absence_or_existence_question(qa.question)
+        assessment_instruction = ASSESSMENT_INSTRUCTION
+        if is_absence_question:
+            assessment_instruction = f"{assessment_instruction}\n\n{VERSIONRAG_ABSENCE_QUESTION_INSTRUCTION}"
+        full_prompt = f"{context_text}\n\n{assessment_instruction}\n\n{QA_PROMPT.format(qa.question)}"
         meta = {
             "question_type": qa.category,
+            "versionrag_absence_or_existence_question": is_absence_question,
         }
         return full_prompt, meta
 
@@ -164,3 +176,17 @@ class VersionRAGAdapter(BaseAdapter):
         text = re.sub(r"[^\w\s-]", "", text)
         text = re.sub(r"[-\s]+", "_", text)
         return text
+
+    @staticmethod
+    def _is_absence_or_existence_question(question: str) -> bool:
+        """Detect VersionRAG yes/no questions where absence can be a real answer."""
+        q = (question or "").strip().lower()
+        if not q:
+            return False
+
+        patterns = [
+            r"^(does|do|did|is|are|was|were|has|have)\b.*\b(exist|exists|present|available|listed|mentioned|support|supports|supported|introduced|added|removed|deprecated|changed|change)\b",
+            r"^(was|were)\b.*\b(new feature|introduced|added|removed|deprecated|changed)\b",
+            r"^(has|have)\b.*\b(changed|change|been added|been removed|been deprecated|been introduced)\b",
+        ]
+        return any(re.search(pattern, q) for pattern in patterns)

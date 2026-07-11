@@ -4,7 +4,7 @@ import time
 import urllib.request
 import urllib.error
 import urllib.parse
-from typing import Dict, List
+from typing import Dict, List, Optional
 import sys
 from pathlib import Path
 
@@ -33,6 +33,30 @@ class VikingStoreWrapper:
         if not text or not self.enc:
             return 0
         return len(self.enc.encode(str(text)))
+
+    def build_context_result(
+        self,
+        context_blocks: List[str],
+        uri_prefix: str = "manual_context",
+        base_result: Optional[Dict] = None,
+    ) -> Dict:
+        blocks = [str(block).strip() for block in (context_blocks or []) if str(block).strip()]
+        recall_texts = {
+            f"{uri_prefix}_{idx}": block
+            for idx, block in enumerate(blocks)
+        }
+        result = dict(base_result or {})
+        result["recall_texts"] = recall_texts
+        result["context_blocks"] = blocks
+        result["retrieved_uris"] = list(recall_texts.keys())
+        result["relations_uris"] = []
+        result["relations_added_uris"] = []
+        result["relation_source_uris"] = {}
+        result["relation_group_keys"] = {}
+        result["relations_found"] = 0
+        result["relations_added"] = 0
+        result.setdefault("retrieval_tokens", 0)
+        return result
 
     def ingest(self, samples: List[StandardDoc], max_workers=10, monitor=None, ingest_mode="per_file") -> dict:
         start_time = time.time()
@@ -174,6 +198,30 @@ class VikingStoreHTTPWrapper:
         if not text or not self.enc:
             return 0
         return len(self.enc.encode(str(text)))
+
+    def build_context_result(
+        self,
+        context_blocks: List[str],
+        uri_prefix: str = "manual_context",
+        base_result: Optional[Dict] = None,
+    ) -> Dict:
+        blocks = [str(block).strip() for block in (context_blocks or []) if str(block).strip()]
+        recall_texts = {
+            f"{uri_prefix}_{idx}": block
+            for idx, block in enumerate(blocks)
+        }
+        result = dict(base_result or {})
+        result["recall_texts"] = recall_texts
+        result["context_blocks"] = blocks
+        result["retrieved_uris"] = list(recall_texts.keys())
+        result["relations_uris"] = []
+        result["relations_added_uris"] = []
+        result["relation_source_uris"] = {}
+        result["relation_group_keys"] = {}
+        result["relations_found"] = 0
+        result["relations_added"] = 0
+        result.setdefault("retrieval_tokens", 0)
+        return result
 
     def _request(self, method: str, path: str, data: dict = None) -> dict:
         url = f"{self.server_url}{path}"

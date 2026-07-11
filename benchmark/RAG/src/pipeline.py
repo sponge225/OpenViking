@@ -2,7 +2,6 @@ import os
 import json
 import time
 import uuid
-import copy
 import threading
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,10 +18,20 @@ from core.vector_store import VikingStoreWrapper
 from core.monitor import BenchmarkMonitor
 from core.metrics import MetricsCalculator
 from core.judge_util import llm_grader
-from core.fallback_judge import judge_answer
 from core.response_parser import parse_llm_response
 from core.checkpoint import CheckpointManager
 from core.question_rewriter import QuestionRewriteError, QuestionRewriteStore, get_or_create_rewrites
+from fallback import (
+    FallbackBotRunner,
+    fallback_judgment_gain_summary,
+    fallback_judgment_summary,
+    fallback_miss_gain_summary,
+    fallback_miss_summary,
+    phase1_fallback_judgment,
+    recoverable_miss_gain_summary,
+    recoverable_miss_summary,
+)
+from phase1_providers import Phase1ProviderRunner
 from vikingbot_runner import run_vikingbot_query
 from nanobot_runner import run_nanobot_query
 
@@ -36,6 +45,13 @@ class BenchmarkPipeline:
         self.logger = get_logger()
         self.monitor = BenchmarkMonitor()
         self.resume = resume
+        self.phase1_provider_runner = Phase1ProviderRunner(config, adapter, vector_db, llm, logger=self.logger)
+        self.fallback_bot_runner = FallbackBotRunner(
+            config,
+            run_vikingbot_query,
+            self._summarize_vikingbot_result,
+            self._resolve_target_uris,
+        )
         
         self.output_dir = self.config['paths']['output_dir']
         if not os.path.exists(self.output_dir):
@@ -118,16 +134,6 @@ class BenchmarkPipeline:
 
         return False, "Evidence audit passed"
 
-    def _fallback_config(self) -> dict:
-        config = {}
-        top_level = self.config.get("fallback")
-        execution_level = self.config.get("execution", {}).get("fallback")
-        if isinstance(top_level, dict):
-            config.update(top_level)
-        if isinstance(execution_level, dict):
-            config.update(execution_level)
-        return config
-
     def _config_bool(self, value, default: bool = False) -> bool:
         if value is None:
             return default
@@ -136,225 +142,6 @@ class BenchmarkPipeline:
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
-
-    def _config_float(self, value, default: float) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
-
-    def _truncate_for_handoff(self, text: str, max_chars: int) -> str:
-        text = str(text or "").strip()
-        if max_chars <= 0 or len(text) <= max_chars:
-            return text
-        return text[:max_chars].rstrip() + "\n...[truncated]"
-
-    def _normalized_scope_tokens(self, value: str) -> set[str]:
-        text = re.sub(r"[^a-zA-Z0-9]+", " ", str(value or "").lower())
-        stop_words = {
-            "viking", "resources", "processed", "docs", "document", "chunk",
-            "file", "html", "json", "txt", "pdf", "md", "data", "dataset",
-            "the", "and", "for", "with", "from", "this", "that", "inc", "corp",
-            "corporation", "company", "companies", "llc", "ltd", "plc", "group",
-        }
-        return {token for token in text.split() if len(token) >= 4 and token not in stop_words}
-
-    def _uri_scope_stats(self, sample_id: str, uris: list[str]) -> dict:
-        target_tokens = self._normalized_scope_tokens(sample_id)
-        if not target_tokens or not uris:
-            return {
-                "on_target_uri_count": 0,
-                "off_target_uri_count": 0,
-                "off_target_uri_ratio": 0.0,
-            }
-
-        on_target = 0
-        off_target = 0
-        for uri in uris:
-            uri_tokens = self._normalized_scope_tokens(uri)
-            if target_tokens & uri_tokens:
-                on_target += 1
-            else:
-                off_target += 1
-        total = on_target + off_target
-        ratio = (off_target / total) if total else 0.0
-        return {
-            "on_target_uri_count": on_target,
-            "off_target_uri_count": off_target,
-            "off_target_uri_ratio": ratio,
-        }
-
-    def _has_unnegated_evidence_gap(self, lines: list[str]) -> bool:
-        issue_patterns = (
-            r"\bmissing\b",
-            r"\bconflict(?:ing|s|ed)?\b",
-            r"\binsufficient\b",
-            r"\bnot supported\b",
-            r"\bnot enough\b",
-            r"\blacks?\b",
-            r"\bcannot be determined\b",
-            r"\bunable to verify\b",
-            r"\bnot fully provided\b",
-            r"\bnot fully available\b",
-        )
-        negated_issue_patterns = (
-            r"\bno\s+.*\bmissing\b",
-            r"\bno\s+.*\bconflict(?:ing|s|ed)?\b",
-            r"\bno\s+.*\binsufficient\b",
-            r"\bno\s+.*\bnot supported\b",
-            r"\bnot\s+.*\bmissing\b",
-            r"\bnot\s+.*\bconflict(?:ing|s|ed)?\b",
-            r"\bwithout\s+.*\bmissing\b",
-            r"\bwithout\s+.*\bconflict(?:ing|s|ed)?\b",
-        )
-        for line in lines:
-            text = re.sub(r"\s+", " ", str(line or "").strip().lower())
-            if not any(re.search(pattern, text) for pattern in issue_patterns):
-                continue
-            if any(re.search(pattern, text) for pattern in negated_issue_patterns):
-                continue
-            return True
-        return False
-
-    def _has_competing_candidate_signal(self, answer: str, parsed) -> bool:
-        analysis = "\n".join(str(x) for x in (parsed.evidence_analysis or []))
-        text = f"{answer}\n{parsed.reasoning or ''}\n{analysis}".lower()
-        competing_patterns = (
-            r"\bmultiple\s+(definitions|sections|clauses|locations|answers|candidates|possibilities)\b",
-            r"\bseveral\s+(definitions|sections|clauses|locations|answers|candidates|possibilities)\b",
-            r"\bdifferent\s+(definitions|sections|clauses|contexts|agreements|sources)\b",
-            r"\bappears?\s+in\s+(multiple|several|two|[0-9]+)\b",
-            r"\blocated\s+in\s+(multiple|several|two|[0-9]+)\b",
-            r"\btwo\s+referenced\s+sections\b",
-            r"\bboth\s+references\s+confirm\b",
-            r"\bpossible\s+(answers|locations|definitions|sections|clauses)\b",
-        )
-        return any(re.search(pattern, text) for pattern in competing_patterns)
-
-    def _assess_phase1_risk(
-        self,
-        qa,
-        sample_id: str,
-        parsed,
-        answer: str,
-        search_res: dict,
-        ov_original_doc_tokens: int,
-        ov_relations_doc_tokens: int,
-    ) -> dict:
-        fallback_config = self._fallback_config()
-        gate_config = fallback_config.get("evidence_risk_gate", {})
-        if gate_config is None:
-            gate_config = {}
-        if not isinstance(gate_config, dict):
-            gate_config = {}
-
-        enabled = self._config_bool(gate_config.get("enabled"), True)
-        flags: list[str] = []
-        triggered_flags: list[str] = []
-        details: dict[str, object] = {}
-
-        if not enabled:
-            return {
-                "enabled": False,
-                "triggered": False,
-                "flags": [],
-                "triggered_flags": [],
-                "reason": "Phase 1 risk gate disabled",
-                "details": {},
-            }
-
-        evidence_lines = [str(line).strip() for line in (parsed.evidence_analysis or []) if str(line).strip()]
-
-        if parsed.missing_info:
-            flags.append("missing_info_nonempty")
-            details["missing_info_count"] = len(parsed.missing_info)
-            if self._config_bool(gate_config.get("fallback_on_missing_info"), True):
-                triggered_flags.append("missing_info_nonempty")
-
-        if self._has_unnegated_evidence_gap(evidence_lines):
-            flags.append("evidence_analysis_reports_gap")
-            if self._config_bool(gate_config.get("fallback_on_evidence_gap"), True):
-                triggered_flags.append("evidence_analysis_reports_gap")
-
-        if self._has_competing_candidate_signal(answer, parsed):
-            flags.append("competing_candidate_evidence")
-            if self._config_bool(gate_config.get("fallback_on_competing_candidates"), True):
-                triggered_flags.append("competing_candidate_evidence")
-
-        retrieved_uris = list(search_res.get("retrieved_uris", []) or [])
-        qa_metadata = getattr(qa, "metadata", {}) or {}
-        scope_source = str(qa_metadata.get("rewrite_source_sample_id", "") or sample_id or "")
-        scope_stats = self._uri_scope_stats(scope_source, retrieved_uris)
-        if not scope_stats["on_target_uri_count"] and qa_metadata:
-            scope_stats = self._uri_scope_stats(str(qa_metadata.get("rewrite_source_sample_id", "")), retrieved_uris)
-        details.update(scope_stats)
-
-        off_target_threshold = self._config_float(gate_config.get("off_target_uri_ratio_threshold"), 0.6)
-        if (
-            scope_stats["off_target_uri_count"] >= 2
-            and scope_stats["off_target_uri_ratio"] >= off_target_threshold
-        ):
-            flags.append("cross_source_evidence")
-            if self._config_bool(gate_config.get("strict_cross_source"), False):
-                triggered_flags.append("cross_source_evidence")
-
-        total_context_tokens = ov_original_doc_tokens + ov_relations_doc_tokens
-        relation_ratio = (ov_relations_doc_tokens / total_context_tokens) if total_context_tokens else 0.0
-        details["relation_context_token_ratio"] = relation_ratio
-        details["ov_original_doc_tokens"] = ov_original_doc_tokens
-        details["ov_relations_doc_tokens"] = ov_relations_doc_tokens
-        relation_threshold = self._config_float(gate_config.get("relation_token_ratio_threshold"), 0.5)
-        if ov_relations_doc_tokens > 0 and relation_ratio >= relation_threshold:
-            flags.append("relation_dominant_context")
-            if self._config_bool(gate_config.get("fallback_on_relation_dominant"), False):
-                triggered_flags.append("relation_dominant_context")
-
-        reason = "Phase 1 risk gate passed"
-        if triggered_flags:
-            reason = "Phase 1 risk gate triggered: " + ", ".join(triggered_flags)
-        elif flags:
-            reason = "Phase 1 risk signals recorded: " + ", ".join(flags)
-
-        return {
-            "enabled": True,
-            "triggered": bool(triggered_flags),
-            "flags": flags,
-            "triggered_flags": triggered_flags,
-            "reason": reason,
-            "details": details,
-        }
-
-    def _build_fallback_bot_question(self, qa, parsed, ov_answer: str, risk: dict) -> tuple[str, bool, int]:
-        fallback_config = self._fallback_config()
-        if not self._config_bool(fallback_config.get("pass_phase1_draft_to_bot"), True):
-            return qa.question, False, 0
-
-        answer_chars = int(self._config_float(fallback_config.get("phase1_draft_answer_chars"), 1500))
-        evidence_chars = int(self._config_float(fallback_config.get("phase1_draft_evidence_chars"), 2000))
-        evidence_text = "\n".join(str(x) for x in (parsed.evidence_analysis or []))
-        risk_flags = ", ".join(risk.get("flags", [])) or "none"
-        triggered_flags = ", ".join(risk.get("triggered_flags", [])) or "none"
-
-        handoff = f"""Original question:
-{qa.question}
-
-Phase 1 produced an untrusted draft answer:
-{self._truncate_for_handoff(ov_answer, answer_chars)}
-
-Phase 1 evidence analysis:
-{self._truncate_for_handoff(evidence_text, evidence_chars)}
-
-Phase 1 missing information:
-{json.dumps(parsed.missing_info or [], ensure_ascii=False)}
-
-Phase 1 risk flags: {risk_flags}
-Phase 1 triggered risk flags: {triggered_flags}
-
-Instructions:
-The draft answer may be wrong. Use it only as a search hint.
-Verify every claim against OpenViking documents before answering.
-If the draft is unsupported or incomplete, correct it."""
-        return handoff, True, len(handoff)
 
     def _build_supplemental_query(self, question: str, parsed, retrieval_instruction: str = "") -> str:
         parts = []
@@ -397,7 +184,7 @@ If the draft is unsupported or incomplete, correct it."""
         for uri, content in (extra.get("recall_texts", {}) or {}).items():
             if uri not in merged["recall_texts"]:
                 merged["recall_texts"][uri] = content
-                merged["context_blocks"].append(str(content))
+                merged["context_blocks"].append(str(content)[:8000])
 
         if "relations_uris" in merged:
             rel_seen = set(merged["relations_uris"])
@@ -490,6 +277,34 @@ If the draft is unsupported or incomplete, correct it."""
         if "completion_tokens" in usage:
             return int(usage.get("completion_tokens", 0) or 0)
         return int(usage.get("llm_output_tokens", 0) or 0)
+
+    def _score_answer_for_accuracy(self, question: str, golds, answer: str, dataset_name: str) -> tuple[float, float, dict]:
+        f1 = max((MetricsCalculator.calculate_f1(answer, gt) for gt in golds), default=0.0)
+        eval_record = {
+            "score": 0.0,
+            "reasoning": "",
+            "prompt_type": "",
+        }
+
+        try:
+            eval_record = llm_grader(
+                self.llm.llm,
+                self.config['llm']['model'],
+                question,
+                golds,
+                answer,
+                dataset_name=dataset_name,
+            )
+        except Exception as e:
+            self.logger.error(f"Grader error: {e}")
+
+        if MetricsCalculator.check_refusal(answer) and any(MetricsCalculator.check_refusal(gt) for gt in golds):
+            f1 = 1.0
+            eval_record["score"] = 4.0
+            eval_record["reasoning"] = "System successfully identified Unanswerable/Refusal condition."
+            eval_record["prompt_type"] = "Heuristic_Refusal_Check"
+
+        return f1, eval_record["score"], eval_record
 
     def _parse_relation_reason_json(self, reason):
         if isinstance(reason, dict):
@@ -612,6 +427,61 @@ If the draft is unsupported or incomplete, correct it."""
         stats["skipped_relation_to_uri_count"] = len(stats["skipped_relation_to_uris"])
         stats["has_relation_to_uri_skipped"] = stats["skipped_relation_to_uri_count"] > 0
         return stats
+
+    def _summarize_phase1_evidence_efficiency(self, records: list[dict]) -> dict:
+        samples = []
+        for record in records:
+            fallback = record.get("fallback", {}) or {}
+            provider_name = str(
+                fallback.get("primary_provider", "raw_context_phase1_result")
+                or "raw_context_phase1_result"
+            )
+            provider_result = (
+                (fallback.get("provider_results", {}) or {}).get(provider_name, {}) or {}
+            )
+            details = provider_result.get("details", {}) or {}
+            if "stage1_latency_sec" not in details:
+                continue
+            samples.append({
+                "provider_latency_sec": float(provider_result.get("latency_sec", 0) or 0),
+                "stage1_latency_sec": float(details.get("stage1_latency_sec", 0) or 0),
+                "stage1_input_tokens": int(details.get("stage1_input_tokens", 0) or 0),
+                "stage1_output_tokens": int(details.get("stage1_output_tokens", 0) or 0),
+                "stage1_prompt_chars": int(details.get("stage1_prompt_chars", 0) or 0),
+                "context_original_chars": int(details.get("stage1_context_original_chars", 0) or 0),
+                "context_chars": int(details.get("stage1_context_chars", 0) or 0),
+                "context_reduction_pct": float(details.get("stage1_context_reduction_pct", 0) or 0),
+                "stage2_ran": bool(details.get("stage2_ran", False)),
+                "llm_call_count": int(
+                    details.get(
+                        "llm_call_count",
+                        1 + int(bool(details.get("stage2_ran", False))),
+                    ) or 0
+                ),
+            })
+
+        if not samples:
+            return {}
+
+        def average(key: str) -> float:
+            return sum(float(sample[key]) for sample in samples) / len(samples)
+
+        stage1_latencies = sorted(sample["stage1_latency_sec"] for sample in samples)
+        p95_index = int((len(stage1_latencies) - 1) * 0.95)
+        return {
+            "Records": len(samples),
+            "Average Phase1 Provider Time (s)": average("provider_latency_sec"),
+            "Average Stage1 Evidence LLM Time (s)": average("stage1_latency_sec"),
+            "P95 Stage1 Evidence LLM Time (s)": stage1_latencies[p95_index],
+            "Average Stage1 Input Tokens": average("stage1_input_tokens"),
+            "Average Stage1 Output Tokens": average("stage1_output_tokens"),
+            "Average Stage1 Prompt Chars": average("stage1_prompt_chars"),
+            "Average Original Context Chars": average("context_original_chars"),
+            "Average Submitted Context Chars": average("context_chars"),
+            "Average Context Reduction (%)": average("context_reduction_pct"),
+            "Average LLM Calls per Query": average("llm_call_count"),
+            "Stage2 Run Rate": sum(1 for sample in samples if sample["stage2_ran"]) / len(samples),
+        }
 
     def _save_partial_results(self, results_map: dict):
         # Persist partial generation results so we can resume safely after interruption.
@@ -859,15 +729,32 @@ If the draft is unsupported or incomplete, correct it."""
             json.dump({"results": eval_records}, f, indent=2, ensure_ascii=False)
 
         if total > 0:
+            performance_metrics = {
+                "Average F1 Score": sum(r['metrics']['F1'] for r in eval_records) / total,
+                "Average Recall": sum(r['metrics']['Recall'] for r in eval_records) / total,
+                "Average Accuracy (Hit 0-4)": sum(r['metrics']['Accuracy'] for r in eval_records) / total,
+                "Average Accuracy (normalization)": (sum(r['metrics']['Accuracy'] for r in eval_records) / total)/4,
+            }
+            phase1_metric_records = [
+                r for r in eval_records
+                if "Phase1 Accuracy" in (r.get("metrics", {}) or {})
+            ]
+            if phase1_metric_records:
+                performance_metrics["Average Phase1 F1 Score"] = (
+                    sum(float((r.get("metrics", {}) or {}).get("Phase1 F1", 0.0) or 0.0) for r in phase1_metric_records)
+                    / len(phase1_metric_records)
+                )
+                performance_metrics["Average Phase1 Accuracy (Hit 0-4)"] = (
+                    sum(float((r.get("metrics", {}) or {}).get("Phase1 Accuracy", 0.0) or 0.0) for r in phase1_metric_records)
+                    / len(phase1_metric_records)
+                )
+                performance_metrics["Average Phase1 Accuracy (normalization)"] = (
+                    performance_metrics["Average Phase1 Accuracy (Hit 0-4)"] / 4
+                )
             self._update_report({
                 "Dataset": self.config.get('dataset_name', 'Unknown_Dataset'),
                 "Total Queries Evaluated": total,
-                "Performance Metrics": {
-                    "Average F1 Score": sum(r['metrics']['F1'] for r in eval_records) / total,
-                    "Average Recall": sum(r['metrics']['Recall'] for r in eval_records) / total,
-                    "Average Accuracy (Hit 0-4)": sum(r['metrics']['Accuracy'] for r in eval_records) / total,
-                    "Average Accuracy (normalization)": (sum(r['metrics']['Accuracy'] for r in eval_records) / total)/4,
-                }
+                "Performance Metrics": performance_metrics,
             })
 
             # Relations Usage report from vikingbot records
@@ -1014,44 +901,103 @@ If the draft is unsupported or incomplete, correct it."""
                         }
                     })
 
-            # Fallback mode statistics
+            # Fallback judgment summaries
             fallback_records = [r for r in eval_records if 'fallback' in r]
             if fallback_records:
-                triggered = [r for r in fallback_records if r['fallback'].get('triggered')]
-                not_triggered = [r for r in fallback_records if not r['fallback'].get('triggered')]
-                fb_total = len(fallback_records)
-
-                avg_total_latency = sum(r['fallback']['total_latency_sec'] for r in fallback_records) / fb_total
-                avg_total_input = sum(r['fallback']['total_input_tokens'] for r in fallback_records) / fb_total
-                avg_total_output = sum(r['fallback']['total_output_tokens'] for r in fallback_records) / fb_total
-
-                avg_ov_latency = sum(r['fallback']['ov_retrieval_sec'] for r in fallback_records) / fb_total
-
-                fallback_report = {
-                    "Total Queries": fb_total,
-                    "Fallback Trigger Rate": len(triggered) / fb_total,
-                    "Triggered Count": len(triggered),
-                    "Not Triggered Count": len(not_triggered),
-                    "Average Total Latency (s)": avg_total_latency,
-                    "Average Total Input Tokens": avg_total_input,
-                    "Average Total Output Tokens": avg_total_output,
-                    "Average OV Retrieval Latency (s)": avg_ov_latency,
+                fallback_mode_stats = self._fallback_mode_statistics(fallback_records)
+                phase1_evidence_efficiency = self._summarize_phase1_evidence_efficiency(
+                    fallback_records
+                )
+                fallback_report_update = {
+                    "__delete_keys__": [
+                        "Phase1 Fallback Judgment Metrics",
+                        "Phase1 Provider Judgment Metrics",
+                        "Phase1 Provider Judgment Comparison",
+                        "Phase1 Provider Cost",
+                        "Naive Phase1 Fallback Judgment Metrics",
+                        "Naive Phase1 Result Fallback Judgment Metrics",
+                        "Phase1 Fallback Judgment Comparison",
+                        "Phase1 Two-Stage Evidence Metrics",
+                        "Phase1 Evidence Efficiency",
+                    ],
+                    "Fallback Judgment (whether the fallback decision matches phase1 answer quality)": (
+                        fallback_judgment_summary(fallback_records)
+                    ),
+                    "Fallback Miss (bad phase1 answers that were not sent to fallback)": (
+                        fallback_miss_summary(fallback_records)
+                    ),
+                    "Recoverable Miss (missed fallback cases where shadow bot would have corrected phase1)": (
+                        recoverable_miss_summary(fallback_records)
+                    ),
+                    "Fallback Judgment By Accuracy Gain (whether fallback decision matches bot improvement)": (
+                        fallback_judgment_gain_summary(fallback_records, logger=self.logger)
+                    ),
+                    "Fallback Miss By Accuracy Gain (missed cases where bot would improve phase1)": (
+                        fallback_miss_gain_summary(fallback_records)
+                    ),
+                    "Recoverable Miss By Accuracy Gain (missed fallback cases where shadow bot improved phase1)": (
+                        recoverable_miss_gain_summary(fallback_records)
+                    ),
+                    "Fallback Mode Statistics": fallback_mode_stats,
                 }
-
-                if triggered:
-                    avg_bot_latency = sum(r['fallback']['bot_latency_sec'] for r in triggered) / len(triggered)
-                    avg_bot_tokens = sum(r['fallback']['bot_input_tokens'] + r['fallback']['bot_output_tokens'] for r in triggered) / len(triggered)
-                    fallback_report["Average Bot Latency (triggered) (s)"] = avg_bot_latency
-                    fallback_report["Average Bot Tokens (triggered)"] = avg_bot_tokens
-                    fallback_report["Average Accuracy (triggered)"] = sum(r['metrics']['Accuracy'] for r in triggered) / len(triggered)
-
-                if not_triggered:
-                    fallback_report["Average Accuracy (not triggered)"] = sum(r['metrics']['Accuracy'] for r in not_triggered) / len(not_triggered)
-
-                fallback_report["Average Accuracy (overall)"] = sum(r['metrics']['Accuracy'] for r in fallback_records) / fb_total
-
-                self._update_report({"Fallback Mode Statistics": fallback_report})
+                if phase1_evidence_efficiency:
+                    fallback_report_update["Phase1 Evidence Efficiency"] = phase1_evidence_efficiency
+                self._update_report(fallback_report_update)
         self.checkpoint_manager.delete_checkpoint()
+
+    def _fallback_mode_statistics(self, fallback_records):
+        """Keep the legacy fallback-mode summary alongside provider judgment metrics."""
+        total = len(fallback_records)
+        triggered = [
+            row for row in fallback_records
+            if bool((row.get("fallback", {}) or {}).get("triggered"))
+        ]
+        not_triggered = [row for row in fallback_records if row not in triggered]
+
+        def avg(rows, getter):
+            if not rows:
+                return 0.0
+            return sum(float(getter(row) or 0.0) for row in rows) / len(rows)
+
+        def metric(row, key):
+            return (row.get("metrics", {}) or {}).get(key, 0)
+
+        def fb(row, key):
+            return (row.get("fallback", {}) or {}).get(key, 0)
+
+        return {
+            "Total Queries": total,
+            "Fallback Trigger Rate": (len(triggered) / total) if total else 0.0,
+            "Triggered Count": len(triggered),
+            "Not Triggered Count": len(not_triggered),
+            "Average Total Latency (s)": avg(
+                fallback_records,
+                lambda row: fb(row, "total_latency_sec") or (row.get("retrieval", {}) or {}).get("latency_sec"),
+            ),
+            "Average Total Input Tokens": avg(
+                fallback_records,
+                lambda row: fb(row, "total_input_tokens") or (row.get("token_usage", {}) or {}).get("total_input_tokens"),
+            ),
+            "Average Total Output Tokens": avg(
+                fallback_records,
+                lambda row: fb(row, "total_output_tokens") or (row.get("token_usage", {}) or {}).get("llm_output_tokens"),
+            ),
+            "Average OV Retrieval Latency (s)": avg(
+                fallback_records,
+                lambda row: fb(row, "ov_retrieval_sec") or (row.get("retrieval", {}) or {}).get("latency_sec"),
+            ),
+            "Average Bot Latency (triggered) (s)": avg(
+                triggered,
+                lambda row: fb(row, "bot_latency_sec"),
+            ),
+            "Average Bot Tokens (triggered)": avg(
+                triggered,
+                lambda row: int(fb(row, "bot_input_tokens") or 0) + int(fb(row, "bot_output_tokens") or 0),
+            ),
+            "Average Accuracy (triggered)": avg(triggered, lambda row: metric(row, "Accuracy")),
+            "Average Accuracy (not triggered)": avg(not_triggered, lambda row: metric(row, "Accuracy")),
+            "Average Accuracy (overall)": avg(fallback_records, lambda row: metric(row, "Accuracy")),
+        }
 
     def run_deletion(self):
         """Step 5: Cleanup"""
@@ -1715,16 +1661,13 @@ If the draft is unsupported or incomplete, correct it."""
             search_res = self.db.retrieve(query=enhanced_query, topk=self.config['execution']['retrieval_topk'])
             ov_retrieval_sec = time.time() - t0
 
-            t1 = time.time()
-            generation = self._generate_with_optional_supplemental_retrieval(
-                qa,
-                search_res,
-                retrieval_instruction=retrieval_instruction,
-                skip_supplemental=True,
-            )
-            ov_generation_sec = time.time() - t1
+            if self._config_bool(self.config.get("execution", {}).get("use_oracle_evidence_context"), False):
+                search_res = self.db.build_context_result(
+                    qa.evidence,
+                    uri_prefix="oracle_evidence",
+                    base_result=search_res,
+                )
 
-            search_res = generation["search_res"]
             recall_texts = search_res["recall_texts"]
             context_blocks = search_res["context_blocks"]
             retrieved_uris = search_res["retrieved_uris"]
@@ -1743,189 +1686,109 @@ If the draft is unsupported or incomplete, correct it."""
             ov_original_doc_tokens = sum(self.db.count_tokens(block) for block in original_blocks)
             ov_relations_doc_tokens = sum(self.db.count_tokens(block) for block in relations_blocks)
 
-            retrieved_texts = list(recall_texts.values())
-            recall = MetricsCalculator.check_recall(retrieved_texts, qa.evidence)
-
-            full_prompt = generation["prompt"]
-            ans_raw = generation["raw"]
-            parsed = generation["parsed"]
-            ov_answer = generation["answer"]
-
-            ov_in_tokens = generation["input_tokens"]
-            ov_out_tokens = generation["output_tokens"]
-
-            phase1_risk = self._assess_phase1_risk(
-                qa=qa,
+            t1 = time.time()
+            primary_provider, provider_results = self.phase1_provider_runner.run_all(
+                qa,
+                search_res,
                 sample_id=task["sample_id"],
-                parsed=parsed,
-                answer=ov_answer,
-                search_res=search_res,
+                retrieval_instruction=retrieval_instruction,
                 ov_original_doc_tokens=ov_original_doc_tokens,
                 ov_relations_doc_tokens=ov_relations_doc_tokens,
             )
-            audit_needs_more = bool(generation["supplemental"].get("audit_needs_more"))
-            audit_reason_parts = []
-            audit_reason = str(generation["supplemental"].get("reason", "") or "")
-            if audit_needs_more and audit_reason:
-                audit_reason_parts.append(audit_reason)
-            if phase1_risk.get("triggered"):
-                audit_reason_parts.append(str(phase1_risk.get("reason", "")))
-            combined_audit_reason = " | ".join(part for part in audit_reason_parts if part)
+            ov_generation_sec = time.time() - t1
 
-            # --- Phase 2: Fallback Judge ---
-            verdict = judge_answer(
-                parsed.sufficient,
-                ov_answer,
-                parsed.reasoning,
-                parsed.action,
-                audit_needs_more or bool(phase1_risk.get("triggered")),
-                combined_audit_reason,
-            )
+            primary_result = provider_results[primary_provider]
+            provider_result_records = {
+                name: result.to_record()
+                for name, result in provider_results.items()
+            }
+            provider_total_input_tokens = sum(int(r.input_tokens or 0) for r in provider_results.values())
+            provider_total_output_tokens = sum(int(r.output_tokens or 0) for r in provider_results.values())
+            provider_total_latency_sec = sum(float(r.latency_sec or 0.0) for r in provider_results.values())
+            provider_diagnostic_input_tokens = max(0, provider_total_input_tokens - int(primary_result.input_tokens or 0))
+            provider_diagnostic_output_tokens = max(0, provider_total_output_tokens - int(primary_result.output_tokens or 0))
+            provider_diagnostic_latency_sec = max(0.0, provider_total_latency_sec - float(primary_result.latency_sec or 0.0))
+
+            search_res = primary_result.search_res
+
+            retrieved_texts = list(recall_texts.values())
+            recall = MetricsCalculator.check_recall(retrieved_texts, qa.evidence)
+
+            full_prompt = primary_result.prompt
+            ans_raw = primary_result.raw
+            parsed = primary_result.parsed
+            ov_answer = primary_result.answer
+
+            ov_in_tokens = int(primary_result.input_tokens or 0)
+            ov_out_tokens = int(primary_result.output_tokens or 0)
 
             # --- Phase 3: Fallback decision ---
-            fallback_triggered = verdict.should_fallback
+            fallback_triggered = bool(primary_result.should_fallback)
+            fallback_executed = fallback_triggered
             final_answer = ov_answer
             bot_latency_sec = 0
             bot_input_tokens = 0
             bot_output_tokens = 0
             bot_detail = None
-            phase1_draft_passed_to_bot = False
-            phase1_draft_handoff_chars = 0
+            shadow_bot_detail = None
+            shadow_bot_error = ""
 
-            if fallback_triggered:
+            if fallback_executed:
                 self.logger.info(
-                    f"[Query-{task['id']}] Fallback triggered ({verdict.reasoning}), "
+                    f"[Query-{task['id']}] Fallback triggered ({primary_result.reasoning}), "
                     f"calling bot (relations={bot_use_relations})"
                 )
-                bot_config = copy.deepcopy(self.config)
-                bot_config.setdefault('vikingbot', {})['use_relations'] = bot_use_relations
-
-                session_id = f"fallback_{uuid.uuid4().hex}"
-                restrict_to_qa_doc = bool(self.config.get("execution", {}).get("restrict_to_qa_doc", False))
-                allowed_target_uris = self._resolve_target_uris(task, qa) if restrict_to_qa_doc else None
-                bot_question, phase1_draft_passed_to_bot, phase1_draft_handoff_chars = self._build_fallback_bot_question(
+                bot_detail = self.fallback_bot_runner.run(
+                    task,
                     qa,
-                    parsed,
-                    ov_answer,
-                    phase1_risk,
+                    bot_use_relations=bot_use_relations,
+                    trace_suffix="fallback",
                 )
-
-                vikingbot_result = run_vikingbot_query(
-                    question=bot_question,
-                    config=bot_config,
-                    session_id=session_id,
-                    allowed_target_uris=allowed_target_uris,
+                final_answer = bot_detail.get("answer", "")
+                bot_latency_sec = float(bot_detail.get("total_time_sec", 0.0) or 0.0)
+                bot_input_tokens = int(bot_detail.get("prompt_tokens", 0) or 0)
+                bot_output_tokens = int(bot_detail.get("completion_tokens", 0) or 0)
+            else:
+                self.logger.info(
+                    f"[Query-{task['id']}] Fallback not triggered; "
+                    f"running shadow bot for recoverable-miss metrics (relations={bot_use_relations})"
                 )
-
-                final_answer = vikingbot_result.get("answer", "")
-                bot_latency_sec = vikingbot_result.get("total_time_sec", 0)
-                bot_token_usage = vikingbot_result.get("token_usage", {})
-                bot_input_tokens = int(bot_token_usage.get("prompt_tokens", bot_token_usage.get("input_tokens", 0)) or 0)
-                bot_output_tokens = int(bot_token_usage.get("completion_tokens", bot_token_usage.get("output_tokens", 0)) or 0)
-
-                # Extract bot detailed info for reporting
-                bot_tools_used_raw = vikingbot_result.get("tools_used", [])
-                bot_tc_list = bot_tools_used_raw if isinstance(bot_tools_used_raw, list) else []
-                if isinstance(bot_tools_used_raw, str):
-                    try:
-                        bot_tc_list = json.loads(bot_tools_used_raw)
-                    except (json.JSONDecodeError, TypeError):
-                        bot_tc_list = []
-                bot_tc_list = self._normalize_relation_tool_calls(bot_tc_list)
-
-                bot_search_iterations = 0
-                bot_read_iterations = 0
-                bot_relations_hits = 0
-                bot_total_relations_found = 0
-                bot_links_created = 0
-                bot_relation_edges_hit = []
-                read_tool_names = {"openviking_multi_read", "openviking_read"}
-                for tc in bot_tc_list:
-                    if not isinstance(tc, dict):
-                        continue
-                    tn = tc.get('tool_name', '')
-                    if tn == 'openviking_search':
-                        bot_search_iterations += 1
-                        rf = int(tc.get('relations_found', 0) or 0)
-                        result_relation_count = 0
-                        result_data = tc.get('result')
-                        if isinstance(result_data, list):
-                            for item in result_data:
-                                if not isinstance(item, dict):
-                                    continue
-                                mr = item.get('match_reason', '')
-                                if mr.startswith('relation_from:'):
-                                    result_relation_count += 1
-                                    src = mr.replace('relation_from:', '').strip()
-                                    tgt = item.get('uri', '')
-                                    if src and tgt:
-                                        bot_relation_edges_hit.append((src, tgt))
-                        if rf <= 0:
-                            rf = result_relation_count
-                        bot_total_relations_found += rf
-                        if rf > 0:
-                            bot_relations_hits += 1
-                    elif tn in read_tool_names:
-                        bot_read_iterations += 1
-                    elif tn == 'openviking_link':
-                        args_data = tc.get('args', {})
-                        if isinstance(args_data, str):
-                            try:
-                                args_data = json.loads(args_data)
-                            except (json.JSONDecodeError, TypeError):
-                                args_data = {}
-                        to_uris = args_data.get('to_uris', []) if isinstance(args_data, dict) else []
-                        if to_uris:
-                            from_uris = args_data.get('from_uris', [])
-                            bot_links_created += len(from_uris) * len(to_uris)
-
-                bot_iterations_used = vikingbot_result.get("iterations_used", 0)
-                link_tools = {'openviking_link', 'openviking_relations'}
-                total_calls = len(bot_tc_list) if bot_tc_list else 1
-                non_link_call_count = sum(1 for tc in bot_tc_list if isinstance(tc, dict) and tc.get('tool_name', '') not in link_tools)
-                bot_retrieval_iterations = max(1, round(bot_iterations_used * non_link_call_count / total_calls)) if bot_iterations_used > 0 else bot_iterations_used
-
-                # Save trace
-                bot_trace = vikingbot_result.get("trace", "")
-                bot_trace_file = ""
-                if bot_trace:
-                    trace_dir = os.path.join(self.output_dir, "traces")
-                    os.makedirs(trace_dir, exist_ok=True)
-                    bot_trace_file = os.path.join(trace_dir, f"query_{task['id']}_fallback_trace.txt")
-                    try:
-                        trace_data = json.loads(bot_trace, strict=False)
-                        with open(bot_trace_file, "w", encoding="utf-8") as f:
-                            json.dump(trace_data, f, ensure_ascii=False, indent=2, default=str)
-                    except json.JSONDecodeError:
-                        with open(bot_trace_file, "w", encoding="utf-8") as f:
-                            f.write(bot_trace)
-
-                bot_detail = {
-                    "iterations_used": bot_iterations_used,
-                    "retrieval_iterations": bot_retrieval_iterations,
-                    "search_iterations": bot_search_iterations,
-                    "read_iterations": bot_read_iterations,
-                    "tools_used_names": vikingbot_result.get("tools_used_names", []),
-                    "tool_calls": bot_tc_list,
-                    "total_time_sec": bot_latency_sec,
-                    "debug_log": vikingbot_result.get("debug_log", ""),
-                    "session_id": vikingbot_result.get("session_id", ""),
-                    "trace_file": bot_trace_file,
-                    "relations_hits": bot_relations_hits,
-                    "total_relations_found": bot_total_relations_found,
-                    "links_created": bot_links_created,
-                    "relation_edges_hit": bot_relation_edges_hit,
-                }
+                try:
+                    shadow_bot_detail = self.fallback_bot_runner.run(
+                        task,
+                        qa,
+                        bot_use_relations=bot_use_relations,
+                        trace_suffix="shadow_fallback",
+                    )
+                except Exception as e:
+                    shadow_bot_error = str(e)
+                    self.logger.error(f"[Query-{task['id']}] Shadow fallback bot failed: {e}")
 
             # --- Aggregate metrics ---
             total_input_tokens = ov_in_tokens + bot_input_tokens
             total_output_tokens = ov_out_tokens + bot_output_tokens
-            total_latency_sec = ov_retrieval_sec + bot_latency_sec
+            actual_total_input_tokens = provider_total_input_tokens + bot_input_tokens
+            actual_total_output_tokens = provider_total_output_tokens + bot_output_tokens
+            primary_provider_latency_sec = float(primary_result.latency_sec or 0.0)
+            total_latency_sec = primary_provider_latency_sec + bot_latency_sec
+            actual_total_latency_sec = ov_retrieval_sec + ov_generation_sec + bot_latency_sec
 
             self.monitor.worker_end(tokens=total_input_tokens + total_output_tokens)
+            extra_provider_status = []
+            for name, result_for_provider in provider_results.items():
+                if name == primary_provider:
+                    continue
+                status = "YES" if result_for_provider.should_fallback else "NO"
+                extra_provider_status.append(f"{name}Fallback={status}")
+            extra_provider_log = (
+                " | " + " | ".join(extra_provider_status)
+                if extra_provider_status else ""
+            )
             self.logger.info(
                 f"[Query-{task['id']}] Fallback={'YES' if fallback_triggered else 'NO'} | "
-                f"{verdict.reasoning} | Total: {total_latency_sec:.1f}s"
+                f"Provider={primary_provider}{extra_provider_log} | "
+                f"Executed={'YES' if fallback_executed else 'NO'} | "
+                f"{primary_result.reasoning} | Total: {total_latency_sec:.1f}s"
             )
 
             result = {
@@ -1939,8 +1802,9 @@ If the draft is unsupported or incomplete, correct it."""
                     "reasoning": parsed.reasoning,
                     "evidence_analysis": parsed.evidence_analysis,
                     "missing_info": parsed.missing_info,
-                    "supplemental_retrieval": generation["supplemental"],
-                    "phase1_risk": phase1_risk,
+                    "supplemental_retrieval": primary_result.supplemental,
+                    "phase1_provider": primary_provider,
+                    "phase1_provider_results": provider_result_records,
                 },
                 "metrics": {"Recall": recall},
                 "token_usage": {
@@ -1953,13 +1817,27 @@ If the draft is unsupported or incomplete, correct it."""
                 },
                 "fallback": {
                     "triggered": fallback_triggered,
+                    "executed": fallback_executed,
+                    "phase1_judge_should_fallback": fallback_triggered,
+                    "primary_provider": primary_provider,
+                    "provider_results": provider_result_records,
+                    "provider_total_input_tokens": provider_total_input_tokens,
+                    "provider_total_output_tokens": provider_total_output_tokens,
+                    "provider_total_latency_sec": provider_total_latency_sec,
+                    "provider_diagnostic_input_tokens": provider_diagnostic_input_tokens,
+                    "provider_diagnostic_output_tokens": provider_diagnostic_output_tokens,
+                    "provider_diagnostic_latency_sec": provider_diagnostic_latency_sec,
+                    "actual_total_input_tokens": actual_total_input_tokens,
+                    "actual_total_output_tokens": actual_total_output_tokens,
+                    "actual_total_latency_sec": actual_total_latency_sec,
                     "phase1_action": parsed.action,
                     "bot_use_relations": bot_use_relations,
-                    "judge_reasoning": verdict.reasoning,
+                    "judge_reasoning": primary_result.reasoning,
                     "ov_answer": ov_answer,
-                    "supplemental_retrieval": generation["supplemental"],
+                    "supplemental_retrieval": primary_result.supplemental,
                     "ov_retrieval_sec": ov_retrieval_sec,
                     "ov_generation_sec": ov_generation_sec,
+                    "primary_provider_latency_sec": primary_provider_latency_sec,
                     "bot_latency_sec": bot_latency_sec,
                     "ov_input_tokens": ov_in_tokens,
                     "ov_output_tokens": ov_out_tokens,
@@ -1974,15 +1852,29 @@ If the draft is unsupported or incomplete, correct it."""
                     "ov_relations_uris": ov_relations_uris,
                     "ov_original_doc_tokens": ov_original_doc_tokens,
                     "ov_relations_doc_tokens": ov_relations_doc_tokens,
-                    "phase1_risk_triggered": bool(phase1_risk.get("triggered")),
-                    "phase1_risk_flags": phase1_risk.get("flags", []),
-                    "phase1_risk_triggered_flags": phase1_risk.get("triggered_flags", []),
-                    "phase1_risk_reason": phase1_risk.get("reason", ""),
-                    "phase1_risk_details": phase1_risk.get("details", {}),
-                    "phase1_draft_passed_to_bot": phase1_draft_passed_to_bot,
-                    "phase1_draft_handoff_chars": phase1_draft_handoff_chars,
+                    "shadow_bot": {
+                        "attempted": not fallback_executed,
+                        "executed": bool(shadow_bot_detail) and not shadow_bot_error,
+                        "error": shadow_bot_error,
+                        "answer": (shadow_bot_detail or {}).get("answer", ""),
+                        "latency_sec": float((shadow_bot_detail or {}).get("total_time_sec", 0.0) or 0.0),
+                        "input_tokens": int((shadow_bot_detail or {}).get("prompt_tokens", 0) or 0),
+                        "output_tokens": int((shadow_bot_detail or {}).get("completion_tokens", 0) or 0),
+                        "total_tokens": int((shadow_bot_detail or {}).get("total_tokens", 0) or 0),
+                        "bot_use_relations": bot_use_relations,
+                        "detail": shadow_bot_detail or {},
+                    },
                 },
             }
+            naive_rule_result = provider_results.get("raw_context_naive_rule")
+            if naive_rule_result:
+                result["fallback"].update({
+                    "naive_rule_triggered": bool(naive_rule_result.should_fallback),
+                    "naive_rule_reasoning": naive_rule_result.reasoning,
+                    "naive_rule_input_tokens": int(naive_rule_result.input_tokens or 0),
+                    "naive_rule_output_tokens": int(naive_rule_result.output_tokens or 0),
+                    "naive_rule_latency_sec": float(naive_rule_result.latency_sec or 0.0),
+                })
             if bot_detail:
                 result["vikingbot"] = bot_detail
             return result
@@ -2002,46 +1894,118 @@ If the draft is unsupported or incomplete, correct it."""
         This correctly handles multi-annotator scenarios while maintaining compatibility with single-answer datasets (like Locomo).
         """
         ans, golds = item['llm']['final_answer'], item['gold_answers']
-        
-        f1 = max((MetricsCalculator.calculate_f1(ans, gt) for gt in golds), default=0.0)
-        
-        dataset_name = self.config.get('dataset_name', 'Unknown_Dataset')
-        
-        eval_record = {
-            "score": 0.0,
-            "reasoning": "",
-            "prompt_type": ""
-        }
-        
-        try:
-            eval_res = llm_grader(
-                self.llm.llm, 
-                self.config['llm']['model'], 
-                item['question'], 
-                golds,
-                ans,
-                dataset_name=dataset_name
-            )
-            eval_record = eval_res
-                
-        except Exception as e:
-            self.logger.error(f"Grader error: {e}")
-            
-        if MetricsCalculator.check_refusal(ans) and any(MetricsCalculator.check_refusal(gt) for gt in golds):
-            f1 = 1.0
-            eval_record["score"] = 4.0
-            eval_record["reasoning"] = "System successfully identified Unanswerable/Refusal condition."
-            eval_record["prompt_type"] = "Heuristic_Refusal_Check"
 
-        acc = eval_record["score"]
+        dataset_name = self.config.get('dataset_name', 'Unknown_Dataset')
+        f1, acc, eval_record = self._score_answer_for_accuracy(
+            item['question'],
+            golds,
+            ans,
+            dataset_name,
+        )
 
         item["metrics"].update({"F1": f1, "Accuracy": acc})
+        phase1_eval_record = None
+        if "fallback" in item and "ov_answer" in item["fallback"]:
+            phase1_answer = item["fallback"].get("ov_answer", "")
+            if str(phase1_answer or "").strip() == str(ans or "").strip():
+                phase1_f1 = f1
+                phase1_acc = acc
+                phase1_eval_record = dict(eval_record)
+            else:
+                phase1_f1, phase1_acc, phase1_eval_record = self._score_answer_for_accuracy(
+                    item['question'],
+                    golds,
+                    phase1_answer,
+                    dataset_name,
+                )
+            item["metrics"].update({
+                "Phase1 F1": phase1_f1,
+                "Phase1 Accuracy": phase1_acc,
+            })
+
+        if "fallback" in item:
+            fallback_info = item.get("fallback", {}) or {}
+            provider_results = fallback_info.get("provider_results", {}) or {}
+            answer_score_cache = {
+                str(ans or "").strip(): (f1, acc, eval_record)
+            }
+            if phase1_eval_record is not None:
+                answer_score_cache[str(fallback_info.get("ov_answer", "") or "").strip()] = (
+                    item["metrics"].get("Phase1 F1", 0.0),
+                    item["metrics"].get("Phase1 Accuracy", 0.0),
+                    phase1_eval_record,
+                )
+
+            shadow_bot = fallback_info.get("shadow_bot", {}) or {}
+            if shadow_bot.get("executed"):
+                shadow_answer = str(shadow_bot.get("answer", "") or "")
+                cache_key = shadow_answer.strip()
+                if cache_key in answer_score_cache:
+                    shadow_f1, shadow_acc, shadow_eval_record = answer_score_cache[cache_key]
+                else:
+                    shadow_f1, shadow_acc, shadow_eval_record = self._score_answer_for_accuracy(
+                        item['question'],
+                        golds,
+                        shadow_answer,
+                        dataset_name,
+                    )
+                    answer_score_cache[cache_key] = (shadow_f1, shadow_acc, shadow_eval_record)
+                shadow_bot["metrics"] = {
+                    "F1": shadow_f1,
+                    "Accuracy": shadow_acc,
+                }
+                shadow_bot["llm_evaluation"] = {
+                    "prompt_used": shadow_eval_record["prompt_type"],
+                    "reasoning": shadow_eval_record["reasoning"],
+                    "normalized_score": shadow_acc,
+                }
+                item["shadow_bot_evaluation"] = shadow_bot["llm_evaluation"]
+
+            for provider_name, provider_result in provider_results.items():
+                provider_answer = str(provider_result.get("answer", "") or "")
+                cache_key = provider_answer.strip()
+                if cache_key in answer_score_cache:
+                    provider_f1, provider_acc, provider_eval_record = answer_score_cache[cache_key]
+                else:
+                    provider_f1, provider_acc, provider_eval_record = self._score_answer_for_accuracy(
+                        item['question'],
+                        golds,
+                        provider_answer,
+                        dataset_name,
+                    )
+                    answer_score_cache[cache_key] = (provider_f1, provider_acc, provider_eval_record)
+                provider_result["metrics"] = {
+                    "F1": provider_f1,
+                    "Accuracy": provider_acc,
+                }
+                provider_result["llm_evaluation"] = {
+                    "prompt_used": provider_eval_record["prompt_type"],
+                    "reasoning": provider_eval_record["reasoning"],
+                    "normalized_score": provider_acc,
+                }
+
+            for provider_name, provider_result in provider_results.items():
+                provider_judgment = phase1_fallback_judgment(item, provider_name=provider_name)
+                provider_result["fallback_expected_trigger"] = provider_judgment["expected_trigger"]
+                provider_result["fallback_judgment_error"] = provider_judgment["error"]
+                provider_result["fallback_judgment_error_type"] = provider_judgment["error_type"]
+
+            phase1_judgment = phase1_fallback_judgment(item)
+            item["fallback"]["phase1_fallback_expected_trigger"] = phase1_judgment["expected_trigger"]
+            item["fallback"]["phase1_fallback_judgment_error"] = phase1_judgment["error"]
+            item["fallback"]["phase1_fallback_judgment_error_type"] = phase1_judgment["error_type"]
         
         item["llm_evaluation"] = {
             "prompt_used": eval_record["prompt_type"],
             "reasoning": eval_record["reasoning"],
             "normalized_score": acc
         }
+        if phase1_eval_record is not None:
+            item["phase1_llm_evaluation"] = {
+                "prompt_used": phase1_eval_record["prompt_type"],
+                "reasoning": phase1_eval_record["reasoning"],
+                "normalized_score": item["metrics"].get("Phase1 Accuracy", 0.0),
+            }
 
         detailed_info = (
             f"\n" + "="*60 +
@@ -2060,6 +2024,8 @@ If the draft is unsupported or incomplete, correct it."""
 
     def _update_report(self, data):
         """Read existing report, merge new data, and write back"""
+        data = dict(data or {})
+        delete_keys = data.pop("__delete_keys__", [])
         report = {}
         if os.path.exists(self.report_file):
             with open(self.report_file, "r", encoding="utf-8") as f:
@@ -2067,6 +2033,8 @@ If the draft is unsupported or incomplete, correct it."""
                     report = json.load(f)
                 except json.JSONDecodeError:
                     report = {}
+        for key in delete_keys:
+            report.pop(key, None)
         report.update(data)
         with open(self.report_file, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=4, ensure_ascii=False)
