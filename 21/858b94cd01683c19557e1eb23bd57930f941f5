@@ -1,0 +1,65 @@
+openviking/parse/parsers/code/ast/aider_repomap.py
+  s_4975c37be17571::t_2e9973e33a6cff 3 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a61dcd319b29f8b4f6a78ee","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Single":3}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "21858b94cd01683c19557e1eb23bd57930f941f5",
+  "prompts": {},
+  "humans": {
+    "h_00ee841e13c84a": {
+      "author": "sponge225 <1670519171@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_4975c37be17571": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a4f13782459c9841c057158",
+        "model": "gpt-5.5__dev"
+      },
+      "human_author": "sponge225 <1670519171@qq.com>"
+    }
+  },
+  "attestation_metadata": {
+    "openviking/parse/parsers/code/ast/aider_repomap.py": [
+      {
+        "hash": "s_4975c37be17571::t_2e9973e33a6cff",
+        "line_ranges": [
+          {
+            "Single": 3
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a61dcd319b29f8b4f6a78ee",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Single": 3
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "s_4975c37be17571": {
+      "tool": "trae",
+      "conversation_id": "6a4f13782459c9841c057158",
+      "session_id": "6a4f13782459c9841c057158",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_4975c37be17571::t_2e9973e33a6cff": {
+      "tool": "trae",
+      "conversation_id": "6a4f13782459c9841c057158",
+      "session_id": "6a4f13782459c9841c057158",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
