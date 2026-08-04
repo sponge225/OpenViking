@@ -18,4 +18,8 @@ class MinerU:
             "pipeline",
         ]:
             raise ValueError(f"Unsupported backend: {self.backend}")
-        self.method = "auto" if self.backend == "pipeline" else "vlm"
+        if self.backend == "pipeline":
+            if self.method not in {"auto", "txt", "ocr"}:
+                raise ValueError(f"Unsupported pipeline method: {self.method}")
+        else:
+            self.method = "vlm"

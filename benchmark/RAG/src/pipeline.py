@@ -75,6 +75,7 @@ class BenchmarkPipeline:
                 "input_tokens": 0,
                 "output_tokens": 0,
             },
+            "mineru": {"time": 0, "task_time": 0, "documents": 0, "input_tokens": 0, "output_tokens": 0},
             "insertion": {"time": 0, "input_tokens": 0, "output_tokens": 0, "embedding_tokens": 0},
             "deletion": {"time": 0, "input_tokens": 0, "output_tokens": 0, "embedding_tokens": 0}
         }
@@ -640,13 +641,7 @@ class BenchmarkPipeline:
                     ensure_ascii=False,
                 )
 
-    def run_import(self):
-        """Stage: Import documents into OV store"""
-        self.logger.info(">>> Stage: Import (Data Prepare + Ingest)")
-
-        if not self.db:
-            raise RuntimeError("Cannot ingest without a vector store. Disable use_nanobot to use import.")
-
+    def _prepare_import_documents(self):
         doc_dir = self.config['paths'].get('doc_output_dir')
         if not doc_dir:
             doc_dir = os.path.join(self.output_dir, "docs")
@@ -683,7 +678,63 @@ class BenchmarkPipeline:
         except Exception as e:
             self.logger.exception(f"Data preparation failed: {e}")
             exit(1)
+        return doc_info
 
+    def run_mineru(self):
+        """Stage: Prepare BookRAG MinerU PDF caches without building the index."""
+        self.logger.info(">>> Stage: MinerU (PDF Prepare + MinerU Parse)")
+
+        if not self.db:
+            raise RuntimeError("Cannot prepare MinerU without a BookRAG store.")
+        if self.config.get("execution", {}).get("mode") != "bookrag":
+            raise RuntimeError("--step mineru is only supported in BookRAG mode.")
+        prepare_mineru = getattr(self.db, "prepare_mineru", None)
+        if not callable(prepare_mineru):
+            raise RuntimeError("--step mineru requires the dataset-level BookRAG store.")
+
+        doc_info = self._prepare_import_documents()
+        mineru_workers = self.config.get("execution", {}).get("mineru_workers", 1)
+        self.logger.info(f"MinerU preparation documents: {len(doc_info)}")
+        mineru_stats = prepare_mineru(doc_info, max_workers=mineru_workers)
+        self.metrics_summary["mineru"] = mineru_stats
+        self.logger.info(f"MinerU preparation finished. Time: {mineru_stats['time']:.2f}s")
+
+        if self.db:
+            self.db.close()
+
+        report_updates = {}
+        preparation_stats = self.metrics_summary["document_preparation"]
+        if preparation_stats.get("enabled"):
+            report_updates["Document Preparation (Excluded from Insertion)"] = {
+                "PDF Preparation Time (s)": preparation_stats["time"],
+                "PDF Count": preparation_stats.get("pdf_count", 0),
+                "Copied PDFs": preparation_stats.get("copied_pdf", 0),
+                "Rendered Text Documents": preparation_stats.get("rendered_text", 0),
+                "Reused/Cached PDFs": (
+                    preparation_stats.get("reused_pdf", 0)
+                    + preparation_stats.get("skipped_existing", 0)
+                ),
+                "Input Tokens": 0,
+                "Output Tokens": 0,
+            }
+        report_updates["BookRAG MinerU Preparation"] = {
+            "MinerU Preparation Time (s)": mineru_stats.get("time", 0),
+            "MinerU Task Time Sum (s)": mineru_stats.get("task_time", 0),
+            "PDF Documents": mineru_stats.get("documents", 0),
+            "MinerU Workers": mineru_stats.get("mineru_workers", 1),
+            "Input Tokens": 0,
+            "Output Tokens": 0,
+        }
+        self._update_report(report_updates)
+
+    def run_import(self):
+        """Stage: Import documents into OV store"""
+        self.logger.info(">>> Stage: Import (Data Prepare + Ingest)")
+
+        if not self.db:
+            raise RuntimeError("Cannot ingest without a vector store. Disable use_nanobot to use import.")
+
+        doc_info = self._prepare_import_documents()
         ingest_workers = self.config['execution'].get('ingest_workers', 10)
         ingest_mode = self.config['execution'].get('ingest_mode', 'per_file')
         

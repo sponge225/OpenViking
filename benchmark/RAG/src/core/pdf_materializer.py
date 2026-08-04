@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from adapters.base import StandardDoc
+from tqdm import tqdm
 
 
 _MANIFEST_NAME = "_pdf_materialization_manifest.json"
@@ -249,54 +250,24 @@ class PdfMaterializer:
         source_to_pdf: dict[Path, Path] = {}
         manifest_items: list[dict[str, Any]] = []
 
-        for source_path, record in sorted(source_records.items(), key=lambda item: str(item[0])):
-            if not source_path.is_file():
-                raise FileNotFoundError(f"PDF materialization source not found: {source_path}")
-            extension = source_path.suffix.lower()
-            if extension not in _TEXT_EXTENSIONS and extension != ".pdf":
-                raise ValueError(
-                    f"Unsupported PDF materialization source: {source_path} "
-                    f"(supported: .pdf, {', '.join(sorted(_TEXT_EXTENSIONS))})"
+        sorted_sources = sorted(source_records.items(), key=lambda item: str(item[0]))
+        with tqdm(
+            total=len(sorted_sources),
+            desc="Preparing PDFs",
+            unit="doc",
+            dynamic_ncols=True,
+        ) as pbar:
+            for source_path, record in sorted_sources:
+                pbar.set_postfix_str(source_path.name[:40], refresh=False)
+                self._materialize_one_source(
+                    source_path=source_path,
+                    record=record,
+                    previous_manifest=previous_manifest,
+                    stats=stats,
+                    source_to_pdf=source_to_pdf,
+                    manifest_items=manifest_items,
                 )
-
-            source_hash = _file_sha256(source_path)
-            first_sample_id = str(record["first_sample_id"])
-            if extension == ".pdf" and source_path.parent == self.output_dir:
-                target_path = source_path
-                method = "pdf_reused"
-                stats["reused_pdf"] += 1
-            else:
-                target_path = self._target_path(source_path, first_sample_id)
-                method = "pdf_copied" if extension == ".pdf" else "text_pdf_rendered"
-                previous = previous_manifest.get(str(source_path))
-                if self._is_reusable(
-                    previous,
-                    source_hash=source_hash,
-                    target_path=target_path,
-                    method=method,
-                ):
-                    stats["skipped_existing"] += 1
-                elif extension == ".pdf":
-                    self._copy_pdf(source_path, target_path)
-                    stats["copied_pdf"] += 1
-                else:
-                    self._render_text_pdf(source_path, target_path)
-                    stats["rendered_text"] += 1
-
-            target_path = target_path.resolve()
-            source_to_pdf[source_path] = target_path
-            manifest_items.append(
-                {
-                    "source_path": str(source_path),
-                    "source_sha256": source_hash,
-                    "source_size_bytes": source_path.stat().st_size,
-                    "output_pdf_path": str(target_path),
-                    "output_pdf_sha256": _file_sha256(target_path),
-                    "method": method,
-                    "renderer_version": _RENDERER_VERSION,
-                    "sample_ids": sorted(record["sample_ids"]),
-                }
-            )
+                pbar.update(1)
 
         materialized_documents = [
             StandardDoc(
@@ -324,3 +295,61 @@ class PdfMaterializer:
             }
         )
         return materialized_documents, stats
+
+    def _materialize_one_source(
+        self,
+        *,
+        source_path: Path,
+        record: dict[str, Any],
+        previous_manifest: dict[str, dict[str, Any]],
+        stats: dict[str, Any],
+        source_to_pdf: dict[Path, Path],
+        manifest_items: list[dict[str, Any]],
+    ) -> None:
+        if not source_path.is_file():
+            raise FileNotFoundError(f"PDF materialization source not found: {source_path}")
+        extension = source_path.suffix.lower()
+        if extension not in _TEXT_EXTENSIONS and extension != ".pdf":
+            raise ValueError(
+                f"Unsupported PDF materialization source: {source_path} "
+                f"(supported: .pdf, {', '.join(sorted(_TEXT_EXTENSIONS))})"
+            )
+
+        source_hash = _file_sha256(source_path)
+        first_sample_id = str(record["first_sample_id"])
+        if extension == ".pdf" and source_path.parent == self.output_dir:
+            target_path = source_path
+            method = "pdf_reused"
+            stats["reused_pdf"] += 1
+        else:
+            target_path = self._target_path(source_path, first_sample_id)
+            method = "pdf_copied" if extension == ".pdf" else "text_pdf_rendered"
+            previous = previous_manifest.get(str(source_path))
+            if self._is_reusable(
+                previous,
+                source_hash=source_hash,
+                target_path=target_path,
+                method=method,
+            ):
+                stats["skipped_existing"] += 1
+            elif extension == ".pdf":
+                self._copy_pdf(source_path, target_path)
+                stats["copied_pdf"] += 1
+            else:
+                self._render_text_pdf(source_path, target_path)
+                stats["rendered_text"] += 1
+
+        target_path = target_path.resolve()
+        source_to_pdf[source_path] = target_path
+        manifest_items.append(
+            {
+                "source_path": str(source_path),
+                "source_sha256": source_hash,
+                "source_size_bytes": source_path.stat().st_size,
+                "output_pdf_path": str(target_path),
+                "output_pdf_sha256": _file_sha256(target_path),
+                "method": method,
+                "renderer_version": _RENDERER_VERSION,
+                "sample_ids": sorted(record["sample_ids"]),
+            }
+        )

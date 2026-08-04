@@ -6,7 +6,9 @@ import hashlib
 import logging
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from contextlib import redirect_stderr, redirect_stdout
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -15,6 +17,7 @@ from bookrag_core.checkpoint import atomic_write_json, canonical_sha256, file_sh
 from bookrag_core.Index.Tree import DocumentTree
 from bookrag_core.pipelines.tree_aggregation import aggregate_document_trees
 from bookrag_core.utils.ingest_timer import submit_document_task
+from tqdm import tqdm
 
 log = logging.getLogger(__name__)
 
@@ -209,6 +212,135 @@ def prepare_pdf_document_content(
     )
 
 
+def _quiet_worker_logging() -> None:
+    logging.getLogger("bookrag_core").setLevel(logging.WARNING)
+    logging.getLogger("mineru").setLevel(logging.WARNING)
+    try:
+        from loguru import logger as loguru_logger
+
+        loguru_logger.remove()
+    except Exception:
+        pass
+
+
+def _prepare_pdf_document_content_task(args: tuple[Any, str, str]) -> dict[str, Any]:
+    cfg, pdf_path, sample_id = args
+    started = time.monotonic()
+    context = _document_context(cfg, pdf_path, sample_id)
+    worker_log_path = context.cache_dir / "mineru_prepare.log"
+    worker_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with worker_log_path.open("a", encoding="utf-8") as worker_log:
+        worker_log.write(
+            f"\n=== MinerU preparation started: sample={sample_id}, "
+            f"source={pdf_path} ===\n"
+        )
+        worker_log.flush()
+        with redirect_stdout(worker_log), redirect_stderr(worker_log):
+            _quiet_worker_logging()
+            prepare_pdf_document_content(cfg, pdf_path, sample_id)
+        worker_log.write(
+            f"=== MinerU preparation finished: sample={sample_id}, "
+            f"elapsed={time.monotonic() - started:.2f}s ===\n"
+        )
+    return {
+        "sample_id": str(sample_id),
+        "source_path": str(pdf_path),
+        "time": time.monotonic() - started,
+        "log_path": str(worker_log_path),
+    }
+
+
+def _format_eta(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{sec:02d}s"
+    if minutes:
+        return f"{minutes}m{sec:02d}s"
+    return f"{sec}s"
+
+
+def prepare_dataset_mineru_content(
+    cfg,
+    documents: Sequence[tuple[str, str | Path]],
+    *,
+    dataset_name: str = "dataset",
+) -> dict[str, Any]:
+    """Prepare durable MinerU merged-content caches for every PDF document."""
+    ordered = sorted(
+        ((str(sample_id), Path(path).resolve()) for sample_id, path in documents),
+        key=lambda item: (item[0], os.path.normcase(str(item[1]))),
+    )
+    total = len(ordered)
+    if not total:
+        return {
+            "dataset": dataset_name,
+            "documents": 0,
+            "mineru_workers": 0,
+            "time": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+
+    mineru_workers = min(
+        total,
+        max(1, int(getattr(cfg, "mineru_workers", 1))),
+    )
+    started = time.monotonic()
+    log.info(
+        "[BookRAG PDF] MinerU preparation: documents=%d, mineru_workers=%d.",
+        total,
+        mineru_workers,
+    )
+
+    per_document: list[dict[str, Any]] = []
+    with tqdm(
+        total=total,
+        desc="BookRAG MinerU",
+        unit="pdf",
+        dynamic_ncols=True,
+    ) as pbar:
+        tasks = [(cfg, str(path), sample_id) for sample_id, path in ordered]
+        with ProcessPoolExecutor(max_workers=mineru_workers) as executor:
+            futures = {
+                executor.submit(_prepare_pdf_document_content_task, task): task[2]
+                for task in tasks
+            }
+            for completed, future in enumerate(as_completed(futures), start=1):
+                sample_id = futures[future]
+                result = future.result()
+                per_document.append(result)
+                elapsed = time.monotonic() - started
+                remaining = total - completed
+                eta = (elapsed / completed) * remaining if completed else 0
+                pbar.set_postfix_str(
+                    f"last={sample_id}, eta={_format_eta(eta)}",
+                    refresh=False,
+                )
+                pbar.update(1)
+
+    elapsed = time.monotonic() - started
+    task_time = sum(float(item.get("time", 0.0) or 0.0) for item in per_document)
+    log.info(
+        "[BookRAG PDF] MinerU preparation finished: documents=%d, wall=%.2fs, "
+        "task_sum=%.2fs, mineru_workers=%d.",
+        total,
+        elapsed,
+        task_time,
+        mineru_workers,
+    )
+    return {
+        "dataset": dataset_name,
+        "documents": total,
+        "mineru_workers": mineru_workers,
+        "time": elapsed,
+        "task_time": task_time,
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+
+
 def _apply_provenance(
     tree: DocumentTree,
     *,
@@ -293,11 +425,10 @@ def build_dataset_tree_from_pdf(
         max(1, int(getattr(cfg, "doc_workers", 1))),
     )
     log.info(
-        "[BookRAG PDF] Phase 1/2: preparing MinerU content serially for %d documents.",
+        "[BookRAG PDF] Phase 1/2: preparing MinerU content for %d documents.",
         len(ordered),
     )
-    for sample_id, path in ordered:
-        prepare_pdf_document_content(cfg, path, sample_id)
+    prepare_dataset_mineru_content(cfg, ordered, dataset_name=dataset_name)
 
     log.info(
         "[BookRAG PDF] Phase 2/2: building %d structural document trees "
@@ -320,9 +451,22 @@ def build_dataset_tree_from_pdf(
             ): position
             for position, (sample_id, path) in enumerate(ordered)
         }
-        for future in as_completed(futures):
-            position = futures[future]
-            trees[position] = future.result()
+        with tqdm(
+            total=len(futures),
+            desc="BookRAG trees",
+            unit="pdf",
+            dynamic_ncols=True,
+        ) as pbar:
+            for future in as_completed(futures):
+                position = futures[future]
+                trees[position] = future.result()
+                sample_id = ordered[position][0]
+                node_count = len(getattr(trees[position], "nodes", []) or [])
+                pbar.set_postfix_str(
+                    f"last={sample_id}, nodes={node_count}",
+                    refresh=False,
+                )
+                pbar.update(1)
 
     # Completion order must not affect aggregate node IDs or provenance.
     completed_trees = [tree for tree in trees if tree is not None]

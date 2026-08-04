@@ -249,6 +249,7 @@ def build_bookrag_system_config(config: dict[str, Any]) -> SystemConfig:
             embedding_config=copy.deepcopy(embedding_config),
         ),
         index_type="gbc",
+        mineru_workers=max(1, int(execution.get("mineru_workers", 1))),
         doc_workers=max(1, int(execution.get("doc_workers", 4))),
         ingest_workers=max(1, int(execution.get("ingest_workers", 4))),
         source_format="pdf",
@@ -495,6 +496,90 @@ class BookRAGStoreWrapper:
     def count_tokens(self, text: str) -> int:
         return num_tokens(str(text or ""))
 
+    def prepare_mineru(
+        self,
+        samples: Sequence[StandardDoc],
+        max_workers: int | None = None,
+    ) -> dict[str, Any]:
+        """Prepare PDF/MinerU caches without building tree, KG, or GBC index."""
+        execution = self.benchmark_config.get("execution") or {}
+        mineru_workers = max(
+            1,
+            int(
+                max_workers
+                if max_workers is not None
+                else execution.get("mineru_workers", 1)
+            ),
+        )
+        started = time.time()
+        with self._lock:
+            with _BuildFileLock(self.build_lock_path):
+                ordered = self._validate_samples(samples)
+                if not ordered:
+                    return {
+                        "time": time.time() - started,
+                        "task_time": 0,
+                        "documents": 0,
+                        "mineru_workers": mineru_workers,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                    }
+
+                self._close_runtime()
+                self.index_dir.parent.mkdir(parents=True, exist_ok=True)
+                if self.atomic_build:
+                    build_dir = self._prepare_atomic_build_dir()
+                else:
+                    if self.index_dir.exists():
+                        has_tree = (self.index_dir / "tree.pkl").is_file()
+                        is_resumable = self._is_resumable_build_dir(self.index_dir)
+                        if (
+                            any(self.index_dir.iterdir())
+                            and not has_tree
+                            and not is_resumable
+                        ):
+                            raise RuntimeError(
+                                "Refusing to reuse a non-empty direct BookRAG directory "
+                                "without tree.pkl or a valid build checkpoint: "
+                                f"{self.index_dir}"
+                            )
+                    self.index_dir.mkdir(parents=True, exist_ok=True)
+                    build_dir = self.index_dir
+
+                build_config = self.core_config.model_copy(deep=True)
+                build_config.save_path = str(build_dir)
+                build_config.mineru_workers = mineru_workers
+                documents = [
+                    (str(sample.sample_id), Path(sample.doc_path).resolve())
+                    for sample in ordered
+                ]
+                log.info(
+                    "[BookRAG] MinerU-only preparation: documents=%d, "
+                    "mineru_workers=%d, build_dir=%s",
+                    len(documents),
+                    mineru_workers,
+                    build_dir,
+                )
+                from bookrag_core.pipelines.pdf_tree_builder import (
+                    prepare_dataset_mineru_content,
+                )
+
+                stats = prepare_dataset_mineru_content(
+                    build_config,
+                    documents,
+                    dataset_name=str(
+                        self.benchmark_config.get("dataset_name", "dataset")
+                    ),
+                )
+                stats["time"] = time.time() - started
+                stats["input_tokens"] = 0
+                stats["output_tokens"] = 0
+                log.info(
+                    "[BookRAG] MinerU-only preparation finished: time=%.2fs",
+                    stats["time"],
+                )
+                return stats
+
     def ingest(
         self,
         samples: Sequence[StandardDoc],
@@ -512,6 +597,7 @@ class BookRAGStoreWrapper:
                 else execution.get("ingest_workers", 4)
             ),
         )
+        mineru_workers = max(1, int(execution.get("mineru_workers", 1)))
         doc_workers = max(1, int(execution.get("doc_workers", 4)))
         started = time.time()
         with self._lock:
@@ -550,6 +636,7 @@ class BookRAGStoreWrapper:
                     log.info("[BookRAG] Building directly in final directory: %s", build_dir)
                 build_config = self.core_config.model_copy(deep=True)
                 build_config.save_path = str(build_dir)
+                build_config.mineru_workers = mineru_workers
                 build_config.doc_workers = doc_workers
                 build_config.ingest_workers = ingest_workers
                 # Aggregate-tree summary, KG, and embedding providers share the
@@ -568,8 +655,9 @@ class BookRAGStoreWrapper:
                         len(documents),
                     )
                     log.info(
-                        "[BookRAG] Import concurrency: doc_workers=%d, "
+                        "[BookRAG] Import concurrency: mineru_workers=%d, doc_workers=%d, "
                         "ingest_workers=%d (execution.max_workers is query-only).",
+                        mineru_workers,
                         doc_workers,
                         ingest_workers,
                     )

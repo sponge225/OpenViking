@@ -79,7 +79,7 @@ def prepare_pdf_content(cfg: SystemConfig, reforce: bool = False) -> list[dict]:
 
         with open(tmp_save_path, "rb") as f:
             pdf_list = json.load(f)
-        print(f"Loaded content from {tmp_save_path}")
+        log.debug("Loaded cached PDF content from %s", tmp_save_path)
     else:
         # Extract content from the PDF file
         log.info(f"Extracting content from {cfg.pdf_path}...")

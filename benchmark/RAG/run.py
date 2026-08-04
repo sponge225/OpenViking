@@ -67,8 +67,8 @@ def main():
     parser.add_argument("--config", default=default_config_path, 
                         help=f"Path to config file. Default: {default_config_path}")
     
-    parser.add_argument("--step", choices=["all", "import", "gen", "eval", "gen+eval", "del"], default="all", 
-                        help="Execution step: 'import' (Ingest), 'gen' (Retrieve+LLM), 'eval' (Judge), 'gen+eval' (Gen then Eval), or 'all'")
+    parser.add_argument("--step", choices=["all", "mineru", "import", "gen", "eval", "gen+eval", "del"], default="all",
+                        help="Execution step: 'all' runs import -> gen -> eval and does not run standalone mineru; 'mineru' only prepares PDF/MinerU caches; 'import' ingests; 'gen' retrieves+generates; 'eval' judges; 'gen+eval' runs gen -> eval")
 
     parser.add_argument("--resume", action="store_true",
                         help="Resume from checkpoint if available")
@@ -317,19 +317,34 @@ def main():
         )
 
         # --- E. Execute Tasks ---
-        if args.step in ["all", "import"]:
+        stage_plan = {
+            "all": ["import", "gen", "eval"],
+            "mineru": ["mineru"],
+            "import": ["import"],
+            "gen": ["gen"],
+            "eval": ["eval"],
+            "gen+eval": ["gen", "eval"],
+            "del": ["del"],
+        }[args.step]
+        logger.info("Step plan: %s", " -> ".join(stage_plan))
+
+        if "mineru" in stage_plan:
+            logger.info("Stage: MinerU (PDF Prepare + MinerU Parse)")
+            pipeline.run_mineru()
+
+        if "import" in stage_plan:
             logger.info("Stage: Import (Data Prepare + Ingest)")
             pipeline.run_import()
             
-        if args.step in ["all", "gen", "gen+eval"]:
+        if "gen" in stage_plan:
             logger.info("Stage: Generation (Retrieve + Generate)")
             pipeline.run_generation()
             
-        if args.step in ["all", "eval", "gen+eval"]:
+        if "eval" in stage_plan:
             logger.info("Stage: Evaluation (Judge -> Metrics)")
             pipeline.run_evaluation()
 
-        if args.step in ["del"]:
+        if "del" in stage_plan:
             logger.info("Stage: Delete Vector Store")
             pipeline.run_deletion()
         

@@ -404,9 +404,12 @@ def merge_text_and_mark_invalid(prev_content: dict, merged_list: list[dict]):
             merged_str += text + " "
     prev_content["text"] = merged_str.strip()
 
-    print(f"Merged text in page: {prev_content.get('page_idx', -1) + 1}")
-    print(f"Index in Page: {prev_content['middle_json'].get("index", -1) + 1}")
-    print(f"{prev_content['text']}")  # Print first 100 chars for debug
+    log.debug(
+        "Merged text block: page=%s, index=%s, text=%s",
+        prev_content.get("page_idx", -1) + 1,
+        prev_content["middle_json"].get("index", -1) + 1,
+        prev_content["text"][:500],
+    )
 
 
 def text_merger(pdf_list: list[Optional[str]], llm: LLM) -> list[Optional[str]]:

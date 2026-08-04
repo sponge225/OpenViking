@@ -35,9 +35,11 @@ class SystemConfig(BaseModel):
     rag_force_reprocess: Optional[bool] = False
 
     # Import concurrency is deliberately separate from query/evaluation
-    # concurrency. ``doc_workers`` controls independent post-MinerU document
+    # concurrency. ``mineru_workers`` controls independent PDF parsing
+    # processes. ``doc_workers`` controls independent post-MinerU document
     # pipelines. ``ingest_workers`` controls aggregate-tree summary and KG
-    # stages. MinerU itself is always serial.
+    # stages.
+    mineru_workers: int = Field(default=1, ge=1)
     doc_workers: int = Field(default=1, ge=1)
     ingest_workers: int = Field(default=1, ge=1)
 

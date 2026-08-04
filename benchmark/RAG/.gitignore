@@ -6,15 +6,11 @@ datasets/
 data/
 
 # Processed documents and vector storage
-ov_storage/
-ov_storage_content_only/
-ov_storage_raw/
+ov_storage*/
+
 # Evaluation output results
-Output/
-Output_half/
-Output_double/
-Output_sl5/
-Output_sl20/
+Output*/
+
 
 # Python
 __pycache__/
@@ -64,3 +60,4 @@ ovcli.conf
 
 # Dataset-specific ov config files (contain API keys)
 ov.*.conf
+.env
