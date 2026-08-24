@@ -342,6 +342,65 @@ def test_patch_merge_context_provider_get_memory_schema_single_type(monkeypatch)
     assert provider.get_memory_schemas(ctx=None) == [schema]
 
 
+def test_patch_merge_context_provider_uses_registry_override(monkeypatch):
+    monkeypatch.setattr(
+        "openviking.session.memory.session_extract_context_provider."
+        "SessionExtractContextProvider._detect_language",
+        lambda self: "en",
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.session_extract_context_provider.get_openviking_config",
+        lambda: SimpleNamespace(
+            memory=SimpleNamespace(
+                eager_prefetch=False,
+                prefetch_search_topn=5,
+                link_enabled=False,
+            )
+        ),
+    )
+    session_skill_schema = MemoryTypeSchema(
+        memory_type="session_skills",
+        description="Session skills",
+        directory="viking://user/{{ user_space }}/skills",
+        filename_template="{{ skill_name }}/SKILL.md",
+        fields=[],
+        enabled=True,
+    )
+    disabled_skills_schema = MemoryTypeSchema(
+        memory_type="skills",
+        description="Legacy skill statistics",
+        directory="viking://user/{{ user_space }}/memories/skills",
+        filename_template="{{ skill_name }}.md",
+        fields=[],
+        enabled=False,
+    )
+
+    provider = PatchMergeContextProvider(
+        memory_type="session_skills",
+        registry=SimpleNamespace(
+            get=lambda name: session_skill_schema if name == "session_skills" else None
+        ),
+        required_file_uris=[],
+        patches=[],
+        output_language="en",
+    )
+
+    assert provider.get_memory_schemas(ctx=None) == [session_skill_schema]
+
+    legacy_provider = PatchMergeContextProvider(
+        memory_type="skills",
+        required_file_uris=[],
+        patches=[],
+        output_language="en",
+    )
+    legacy_provider._registry = SimpleNamespace(
+        get=lambda name: disabled_skills_schema if name == "skills" else None
+    )
+
+    with pytest.raises(ValueError, match="Memory schema not found or disabled: skills"):
+        legacy_provider.get_memory_schemas(ctx=None)
+
+
 def test_patch_merge_context_provider_get_memory_schema_raises_for_missing_type():
     provider = PatchMergeContextProvider(
         memory_type="missing",

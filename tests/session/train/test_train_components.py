@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from test_fakes import fake_request_context
 
-from openviking.session.memory.dataclass import MemoryFile, StoredLink
+from openviking.session.memory.dataclass import MemoryFile, MemoryTypeSchema, StoredLink
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.session.train import (
     ContentHashPolicySnapshotter,
@@ -632,6 +633,116 @@ async def test_patch_merge_policy_optimizer_merges_all_patch_gradients_once(monk
         "viking://user/u/memories/trajectories/traj2.md",
     ]
     assert {link.from_uri for link in plan.items[0].links} == {f"{root}/重复预订处理.md"}
+
+
+@pytest.mark.asyncio
+async def test_patch_merge_policy_optimizer_maps_session_skill_schema_ops_to_skills_plan(
+    monkeypatch,
+):
+    from openviking.session.memory.dataclass import (
+        ResolvedOperation,
+        ResolvedOperations,
+    )
+
+    monkeypatch.setattr(
+        "openviking.session.memory.session_extract_context_provider."
+        "SessionExtractContextProvider._detect_language",
+        lambda self: "en",
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.session_extract_context_provider.get_openviking_config",
+        lambda: SimpleNamespace(
+            memory=SimpleNamespace(
+                eager_prefetch=False,
+                prefetch_search_topn=5,
+                link_enabled=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "openviking.session.train.components.policy_optimizer.get_openviking_config",
+        lambda: SimpleNamespace(vlm=SimpleNamespace(get_vlm_instance=lambda: object())),
+    )
+
+    skill_uri = "viking://user/u/skills/code-review/SKILL.md"
+    policy_set = ExperienceSet(root_uri="viking://user/u/skills", policies=[])
+    gradient = PatchSemanticGradient(
+        before_file=None,
+        after_file=MemoryFile(
+            uri=skill_uri,
+            content="Read changed files before commenting.",
+            memory_type="skills",
+            extra_fields={
+                "memory_type": "skills",
+                "skill_name": "code-review",
+            },
+        ),
+        base_version=None,
+        rationale="Preserve the verified review workflow.",
+        links=[],
+        confidence=0.9,
+        metadata={},
+    )
+    session_skill_schema = MemoryTypeSchema(
+        memory_type="session_skills",
+        description="Session skills",
+        directory="viking://user/{{ user_space }}/skills",
+        filename_template="{{ skill_name }}/SKILL.md",
+        fields=[],
+        enabled=True,
+    )
+    captured = {}
+
+    class FakeExtractLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self):
+            provider = captured["context_provider"]
+            assert provider.memory_type == "session_skills"
+            assert provider.get_memory_schemas(ctx=None) == [session_skill_schema]
+            return (
+                ResolvedOperations(
+                    upsert_operations=[
+                        ResolvedOperation(
+                            old_memory_file_content=None,
+                            memory_fields={
+                                "skill_name": "code-review",
+                                "content": "Read changed files before commenting.",
+                            },
+                            memory_type="session_skills",
+                            uris=[skill_uri],
+                        )
+                    ],
+                    delete_file_contents=[],
+                    errors=[],
+                ),
+                [],
+            )
+
+    monkeypatch.setattr(
+        "openviking.session.train.components.policy_optimizer.ExtractLoop",
+        FakeExtractLoop,
+    )
+
+    plan = await PatchMergePolicyOptimizer(
+        viking_fs=FakeVikingFS({}),
+        vlm=object(),
+        memory_type="skills",
+        schema_memory_type="session_skills",
+        schema_registry=SimpleNamespace(
+            get=lambda name: session_skill_schema if name == "session_skills" else None
+        ),
+    ).plan(
+        [gradient],
+        policy_set,
+        PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
+    )
+
+    assert plan.items[0].memory_type == "skills"
+    assert plan.items[0].target_name == "code-review"
+    assert plan.items[0].target_uri == skill_uri
+    assert plan.items[0].after_content == "Read changed files before commenting."
 
 
 @pytest.mark.asyncio

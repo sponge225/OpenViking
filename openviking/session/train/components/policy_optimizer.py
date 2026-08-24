@@ -48,6 +48,8 @@ class PatchMergePolicyOptimizer:
     viking_fs: Any = None
     vlm: Any = None
     memory_type: str = "experiences"
+    schema_memory_type: str | None = None
+    schema_registry: Any = None
 
     @tracer(
         "train.policy_optimizer.patch_merge.plan",
@@ -80,11 +82,13 @@ class PatchMergePolicyOptimizer:
             policy_set=policy_set,
             context=context,
         )
+        operation_memory_type = self.schema_memory_type or self.memory_type
         items = _operations_to_plan_items(
             operations=operations,
             gradients=patch_gradients,
             policy_set=policy_set,
             memory_type=self.memory_type,
+            operation_memory_type=operation_memory_type,
         )
         _log_merge_output(
             target="all",
@@ -126,8 +130,10 @@ class PatchMergePolicyOptimizer:
             raise RuntimeError("VikingFS is required for patch-merge policy optimization")
 
         extract_context = ExtractContext(list(context.messages or []))
+        schema_memory_type = self.schema_memory_type or self.memory_type
         provider = PatchMergeContextProvider(
-            memory_type=self.memory_type,
+            memory_type=schema_memory_type,
+            registry=self.schema_registry,
             required_file_uris=_required_file_uris(gradients, policy_set),
             patches=[_gradient_to_merge_patch(gradient) for gradient in gradients],
         )
@@ -138,7 +144,7 @@ class PatchMergePolicyOptimizer:
         isolation_handler = MemoryIsolationHandler(
             context.request_context,
             extract_context,
-            allowed_memory_types={self.memory_type},
+            allowed_memory_types={schema_memory_type},
         )
         isolation_handler.prepare_messages()
         provider._isolation_handler = isolation_handler
@@ -390,19 +396,21 @@ def _operations_to_plan_items(
     gradients: list[SemanticGradient],
     policy_set: PolicySet,
     memory_type: str,
+    operation_memory_type: str | None = None,
 ) -> list[PolicyPlanItem]:
+    operation_memory_type = operation_memory_type or memory_type
     items: list[PolicyPlanItem] = []
     source_links_by_target = _source_trajectory_links_by_target(gradients, policy_set)
     superseded_policies = _superseded_policies_for_gradients(gradients, policy_set)
     confidence_values = [float(gradient.confidence) for gradient in gradients]
     confidence = max(confidence_values) if confidence_values else None
-    name_field = _name_field_for_memory_type(memory_type)
+    name_field = _name_field_for_memory_type(operation_memory_type)
 
-    upsert_output_count = _upsert_output_count(operations, memory_type=memory_type)
+    upsert_output_count = _upsert_output_count(operations, memory_type=operation_memory_type)
     replacement_source_uris_by_target = _replacement_source_uris_by_target(operations)
     upsert_target_uris: set[str] = set()
     for op in getattr(operations, "upsert_operations", []) or []:
-        if getattr(op, "memory_type", None) != memory_type:
+        if getattr(op, "memory_type", None) != operation_memory_type:
             continue
         fields = dict(getattr(op, "memory_fields", {}) or {})
         after_content = str(fields.get("content") or "")
@@ -411,7 +419,7 @@ def _operations_to_plan_items(
         target_name = str(
             fields.get(name_field)
             or fields.get("name")
-            or _fallback_policy_name(op, memory_type=memory_type)
+            or _fallback_policy_name(op, memory_type=operation_memory_type)
         )
         target_uri = first_uri(getattr(op, "uris", []) or [])
         old_file = getattr(op, "old_memory_file_content", None)
@@ -525,7 +533,7 @@ def _name_field_for_memory_type(memory_type: str) -> str:
     """Return the extra_fields key for the policy name in a given memory type."""
     if memory_type == "experiences":
         return "experience_name"
-    if memory_type == "skills":
+    if memory_type in {"skills", "session_skills"}:
         return "skill_name"
     if memory_type.endswith("s"):
         return f"{memory_type[:-1]}_name"
@@ -536,7 +544,7 @@ def _fallback_policy_name(op: Any, *, memory_type: str) -> str:
     uri = first_uri(getattr(op, "uris", []) or [])
     if uri:
         # For skills: path/to/skills/my_skill/SKILL.md → my_skill
-        if memory_type == "skills" and uri.endswith("/SKILL.md"):
+        if memory_type in {"skills", "session_skills"} and uri.endswith("/SKILL.md"):
             parts = uri.rstrip("/").split("/")
             if len(parts) >= 2:
                 return parts[-2]
