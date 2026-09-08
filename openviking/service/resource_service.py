@@ -898,6 +898,7 @@ class ResourceService:
             defer_unnamed_target = True
             direct_understanding = bool(
                 mode is ParseMode.DEFAULT
+                and not bool(processor_kwargs.get("feishu_recursive", False))
                 and self._resource_processor.should_use_understanding_directly(
                     path,
                     **processor_kwargs,

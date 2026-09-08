@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from openviking.connector.delegate import ConnectorDelegate
 from openviking.parse.accessors.base import LocalResource, SourceType
 from openviking.parse.understanding_api import (
     PREPARED_FILE_ID_ARG,
@@ -603,6 +604,91 @@ async def test_uat_producer_payload_reaches_worker_without_persisting_token(
     assert call.kwargs[PREPARED_RESPONSE_ID_ARG] == "response-1"
     assert call.kwargs["custom_option"] == "forwarded"
     assert call.kwargs["parser_backend"] == "understanding"
+
+
+@pytest.mark.asyncio
+async def test_feishu_recursive_url_does_not_bypass_accessor_in_producer(monkeypatch):
+    source = "https://example.larkoffice.com/wiki/wikiToken"
+    root_uri = "viking://resources/lark/wiki"
+    direct_probe = Mock(return_value=True)
+    submit_understanding = AsyncMock(side_effect=AssertionError("recursive import must use accessor"))
+    resource_processor = SimpleNamespace(
+        should_use_understanding_directly=direct_probe,
+        submit_understanding=submit_understanding,
+        process_resource=AsyncMock(),
+    )
+    task_tracker = SimpleNamespace(
+        create=AsyncMock(return_value=SimpleNamespace(task_id="task-1")),
+        start=AsyncMock(),
+        update_stage=AsyncMock(),
+        complete=AsyncMock(),
+        fail=AsyncMock(),
+    )
+    queue_manager = SimpleNamespace(enqueue=AsyncMock())
+    monkeypatch.setattr(
+        "openviking.service.task_tracker.get_task_tracker",
+        Mock(return_value=task_tracker),
+    )
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.get_queue_manager",
+        Mock(return_value=queue_manager),
+    )
+    monkeypatch.setattr("openviking.service.resource_service.uuid4", Mock(return_value="task-1"))
+    monkeypatch.setattr(
+        "openviking.service.resource_service.is_git_repo_url",
+        Mock(return_value=False),
+    )
+    monkeypatch.setattr(ConnectorDelegate, "supported_args", Mock(return_value=set()))
+
+    async def preflight(_self, _source, *, feishu_access_token=None):
+        assert feishu_access_token == "u-secret"
+        return SimpleNamespace(source_name="Wiki Root", source_format="file")
+
+    async def plan_source_job_target(*, source_info, **_kwargs):
+        assert source_info.source_name == "Wiki Root"
+        return root_uri, None, False, False
+
+    service = ResourceService(
+        viking_fs=SimpleNamespace(),
+        resource_processor=resource_processor,
+        skill_processor=SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        service,
+        "_connector_delegate",
+        SimpleNamespace(should_delegate=Mock(return_value=False)),
+    )
+    monkeypatch.setattr(
+        "openviking.parse.accessors.feishu_accessor.FeishuAccessor.preflight_source",
+        preflight,
+    )
+    service._plan_source_job_target = AsyncMock(side_effect=plan_source_job_target)
+    ctx = RequestContext(
+        user=UserIdentifier("account-1", "user-1"),
+        role=Role.USER,
+    )
+
+    result = await service.add_resource(
+        path=source,
+        ctx=ctx,
+        parent="viking://resources/lark",
+        wait=False,
+        allow_local_path_resolution=False,
+        args={
+            "feishu_access_token": "u-secret",
+            "feishu_recursive": True,
+            "custom_option": "forwarded",
+        },
+    )
+
+    assert result == {"status": "success", "task_id": "task-1", "root_uri": root_uri}
+    direct_probe.assert_not_called()
+    submit_understanding.assert_not_awaited()
+    assert queue_manager.enqueue.await_args.args[0] == QueueManager.ADD_RESOURCE
+    payload = queue_manager.enqueue.await_args.args[1]
+    assert payload["understanding_response_id"] is None
+    assert "u-secret" not in json.dumps(payload)
+    assert payload["args"] == {"feishu_recursive": True, "custom_option": "forwarded"}
 
 
 @pytest.mark.asyncio

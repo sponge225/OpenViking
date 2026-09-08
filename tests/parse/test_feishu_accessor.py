@@ -727,6 +727,127 @@ def test_access_wiki_recursive_materializes_mixed_tree(monkeypatch):
         assert not cleanup_path.exists()
 
 
+def test_access_wiki_recursive_preserves_root_bitable_query(monkeypatch):
+    from openviking.parse.accessors.feishu_accessor import FeishuDocument
+
+    accessor = FeishuAccessor()
+    requested_urls: list[str] = []
+
+    monkeypatch.setattr(
+        accessor,
+        "_fetch_wiki_node",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            node_token="wiki_root",
+            space_id="space",
+            title="Sales",
+            obj_type="base",
+            obj_token="app_token",
+        ),
+    )
+    monkeypatch.setattr(accessor, "_list_wiki_node_children", lambda *_args, **_kwargs: [])
+
+    async def fake_fetch_document(url, **_kwargs):
+        requested_urls.append(url)
+        return FeishuDocument(
+            doc_type="base",
+            token="app_token",
+            markdown_content="# scoped base",
+            title="Sales",
+            meta={},
+        )
+
+    monkeypatch.setattr(accessor, "_fetch_document", fake_fetch_document)
+    monkeypatch.setattr(accessor, "_resolve_image_refs", lambda markdown, **_: (markdown, {}))
+
+    resource = asyncio.run(
+        accessor.access(
+            "https://example.feishu.cn/wiki/wiki_root?table=tblSales&view=vewPublic",
+            feishu_recursive=True,
+        )
+    )
+    try:
+        assert requested_urls == [
+            "https://example.feishu.cn/wiki/wiki_root?table=tblSales&view=vewPublic"
+        ]
+        assert (resource.path.parent / "Sales.md").read_text(encoding="utf-8") == "# scoped base"
+    finally:
+        resource.cleanup()
+
+
+def test_access_wiki_recursive_reports_depth_truncation(monkeypatch):
+    from openviking.parse.accessors.feishu_accessor import FeishuDocument
+
+    accessor = FeishuAccessor()
+    nodes = {
+        "wiki_root": _FeishuWikiTreeNode("wiki_root", "space", "Root", "docx", "doc_root"),
+        "wiki_child": _FeishuWikiTreeNode("wiki_child", "space", "Child", "docx", "doc_child"),
+        "wiki_grandchild": _FeishuWikiTreeNode(
+            "wiki_grandchild",
+            "space",
+            "Grandchild",
+            "docx",
+            "doc_grandchild",
+        ),
+    }
+    children = {
+        "wiki_root": [nodes["wiki_child"]],
+        "wiki_child": [nodes["wiki_grandchild"]],
+        "wiki_grandchild": [],
+    }
+
+    async def fake_fetch_document(url, **_kwargs):
+        _doc_type, token = accessor._parse_feishu_url(url)
+        return FeishuDocument(
+            doc_type="docx",
+            token=token,
+            markdown_content=f"# {token}",
+            title=token,
+            meta={},
+        )
+
+    monkeypatch.setattr(
+        accessor,
+        "_resolve_wiki_tree_root",
+        lambda *_args, **_kwargs: nodes["wiki_root"],
+    )
+    monkeypatch.setattr(
+        accessor,
+        "_list_wiki_node_children",
+        lambda _space_id, node_token, **_kwargs: children[node_token],
+    )
+    monkeypatch.setattr(accessor, "_fetch_document", fake_fetch_document)
+    monkeypatch.setattr(accessor, "_resolve_image_refs", lambda markdown, **_: (markdown, {}))
+
+    resource = asyncio.run(
+        accessor.access(
+            "https://example.feishu.cn/wiki/wiki_root",
+            feishu_recursive=True,
+            feishu_max_depth=1,
+        )
+    )
+    try:
+        skipped = resource.meta["feishu_folder_skipped_items"]
+        assert [(item["name"], item["wiki_node_token"]) for item in skipped] == [
+            ("Grandchild", "wiki_grandchild")
+        ]
+        assert "depth limit exceeded" in skipped[0]["reason"]
+        assert (resource.path / "Root.md").exists()
+        assert (resource.path / "Child" / "Child.md").exists()
+        assert not (resource.path / "Child" / "Grandchild.md").exists()
+    finally:
+        resource.cleanup()
+
+    with pytest.raises(RuntimeError, match="depth limit exceeded"):
+        asyncio.run(
+            accessor.access(
+                "https://example.feishu.cn/wiki/wiki_root",
+                feishu_recursive=True,
+                feishu_max_depth=1,
+                strict=True,
+            )
+        )
+
+
 def test_access_wiki_without_recursive_keeps_single_document_behavior(monkeypatch):
     from openviking.parse.accessors.feishu_accessor import FeishuDocument
 

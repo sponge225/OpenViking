@@ -242,6 +242,7 @@ class _FeishuWikiTreeNode:
     title: str
     obj_type: Optional[str] = None
     obj_token: Optional[str] = None
+    source_url: Optional[str] = None
 
 
 class FeishuAccessor(DataAccessor):
@@ -995,24 +996,23 @@ class FeishuAccessor(DataAccessor):
 
             children: List[_FeishuWikiTreeNode] = []
             children_known = False
-            if depth < max_depth:
-                try:
-                    children = await asyncio.to_thread(
-                        self._list_wiki_node_children,
-                        node.space_id,
-                        node.wiki_node_token,
-                        feishu_access_token=feishu_access_token,
-                    )
-                    children_known = True
-                except Exception as exc:
-                    self._record_skipped_wiki_node(
-                        skipped_items,
-                        node=node,
-                        target_dir=target_dir,
-                        error=exc,
-                    )
-                    if strict:
-                        raise
+            try:
+                children = await asyncio.to_thread(
+                    self._list_wiki_node_children,
+                    node.space_id,
+                    node.wiki_node_token,
+                    feishu_access_token=feishu_access_token,
+                )
+                children_known = True
+            except Exception as exc:
+                self._record_skipped_wiki_node(
+                    skipped_items,
+                    node=node,
+                    target_dir=target_dir,
+                    error=exc,
+                )
+                if strict:
+                    raise
 
             content_dir = target_dir
             if children or not children_known:
@@ -1038,6 +1038,20 @@ class FeishuAccessor(DataAccessor):
                 if strict:
                     raise
                 content_path = None
+
+            if depth >= max_depth:
+                if children:
+                    error = RuntimeError(f"Feishu Wiki depth limit exceeded: {max_depth}")
+                    for child in children:
+                        self._record_skipped_wiki_node(
+                            skipped_items,
+                            node=child,
+                            target_dir=content_dir,
+                            error=error,
+                        )
+                    if strict:
+                        raise error
+                return content_dir if children or not children_known else content_path or target_dir
 
             for child in children:
                 await self._materialize_wiki_tree_node(
@@ -1089,8 +1103,9 @@ class FeishuAccessor(DataAccessor):
         if doc_type not in self._DOC_TYPE_HANDLERS:
             raise ValueError(f"Unsupported Feishu Wiki node object type: {node.obj_type}")
 
+        doc_url = node.source_url or self._build_feishu_doc_url(doc_type, node.obj_token)
         doc = await self._fetch_document(
-            self._build_feishu_doc_url(doc_type, node.obj_token),
+            doc_url,
             feishu_access_token=feishu_access_token,
         )
         markdown_content, downloaded_images = await asyncio.to_thread(
@@ -1654,7 +1669,7 @@ class FeishuAccessor(DataAccessor):
         if doc_type != "wiki":
             raise ValueError(f"Feishu recursive import only supports wiki URLs, got: {doc_type}")
         node = self._fetch_wiki_node(token, feishu_access_token)
-        return self._wiki_tree_node_from_api_node(node, fallback_token=token)
+        return self._wiki_tree_node_from_api_node(node, fallback_token=token, source_url=url)
 
     def _fetch_wiki_node_children_page(
         self,
@@ -1744,6 +1759,7 @@ class FeishuAccessor(DataAccessor):
         *,
         fallback_token: str,
         fallback_space_id: Optional[str] = None,
+        source_url: Optional[str] = None,
     ) -> _FeishuWikiTreeNode:
         node_token = str(
             _getattr_safe(node, "node_token", None)
@@ -1761,6 +1777,7 @@ class FeishuAccessor(DataAccessor):
             title=title,
             obj_type=obj_type,
             obj_token=str(obj_token) if obj_token else None,
+            source_url=source_url,
         )
 
     @classmethod
