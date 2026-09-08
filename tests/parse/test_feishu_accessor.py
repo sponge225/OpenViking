@@ -726,7 +726,6 @@ def test_access_wiki_recursive_materializes_mixed_tree(monkeypatch):
         resource.cleanup()
         assert not cleanup_path.exists()
 
-
 def test_access_wiki_recursive_preserves_root_bitable_query(monkeypatch):
     from openviking.parse.accessors.feishu_accessor import FeishuDocument
 

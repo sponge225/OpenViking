@@ -179,9 +179,9 @@ test("restoreWatermark prevents pi -c from re-syncing already captured entries",
   await withPendingDir(async () => {
     const calls = [];
     const c = client({
-      addMessagePayload: async (_sid, payload) => {
-        calls.push(payload);
-        return true;
+      fetchJSON: async (_path, init) => {
+        calls.push(...JSON.parse(init.body).messages);
+        return { ok: true, result: {} };
       },
     });
     const sync = new SyncManager(c, config());
@@ -196,5 +196,120 @@ test("restoreWatermark prevents pi -c from re-syncing already captured entries",
     assert.equal(result.added, 1);
     assert.equal(calls.length, 1);
     assert.match(calls[0].parts[0].text, /Fresh entry/);
+  });
+});
+
+function batchClient(overrides = {}) {
+  const calls = [];
+  const c = client({
+    fetchJSON: async (path, init) => {
+      calls.push({ path: String(path), body: init?.body ? JSON.parse(init.body) : null });
+      return overrides.respond ? overrides.respond(calls.length, path) : { ok: true, result: {} };
+    },
+  });
+  return { c, calls };
+}
+
+test("syncBranch sends the whole turn in one batch request", async () => {
+  await withPendingDir(async () => {
+    const { c, calls } = batchClient();
+    const sync = new SyncManager(c, config());
+    await sync.ensureSession("pi-session");
+
+    const result = await sync.syncBranch([
+      { type: "message", message: { role: "user", content: "First user message for the batch write test." } },
+      { type: "message", message: { role: "assistant", content: "Assistant reply for the batch write test." } },
+      { type: "message", message: { role: "user", content: "Second user message for the batch write test." } },
+    ]);
+
+    assert.equal(result.added, 3);
+    assert.equal(result.allDelivered, true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].path, /\/messages\/batch$/);
+    assert.equal(calls[0].body.messages.length, 3);
+  });
+});
+
+test("takeover barrier drains a large backlog through the batch endpoint", async () => {
+  await withPendingDir(async () => {
+    const { c, calls } = batchClient();
+    const sync = new SyncManager(c, config());
+    await sync.ensureSession("pi-session");
+    const t0 = Date.now();
+    for (let i = 0; i < 250; i++) {
+      await enqueue("addMessage", sync.sessionId, { role: "user", content: `m${i}` }, { createdAt: t0 + i });
+    }
+    await enqueue("addMessage", "other-session", { role: "user", content: "other" }, { createdAt: t0 + 999 });
+
+    assert.equal(await sync.flushForTakeover(), true);
+    assert.deepEqual(calls.map((call) => call.body.messages.length), [100, 100, 50]);
+    // Order preserved across batches.
+    assert.equal(calls[0].body.messages[0].content, "m0");
+    assert.equal(calls[2].body.messages[49].content, "m249");
+    const left = await listPending();
+    assert.equal(left.length, 1);
+    assert.equal(left[0].entry.sessionId, "other-session");
+  });
+});
+
+test("failed batch keeps its entries queued with one retry and leaves the rest untouched", async () => {
+  await withPendingDir(async () => {
+    const { c, calls } = batchClient({ respond: () => ({ ok: false, status: 500 }) });
+    const sync = new SyncManager(c, config());
+    await sync.ensureSession("pi-session");
+    const t0 = Date.now();
+    for (let i = 0; i < 120; i++) {
+      await enqueue("addMessage", sync.sessionId, { role: "user", content: `m${i}` }, { createdAt: t0 + i });
+    }
+
+    assert.equal(await sync.flushForTakeover(), false);
+    assert.equal(calls.length, 1);
+    const retries = (await listPending()).map((p) => p.entry.retries);
+    assert.equal(retries.length, 120);
+    assert.equal(retries.filter((r) => r === 1).length, 100);
+    assert.equal(retries.filter((r) => r === 0).length, 20);
+  });
+});
+
+test("non-retryable batch failure drops the payloads but still advances the sync watermark", async () => {
+  await withPendingDir(async () => {
+    const { c, calls } = batchClient({ respond: () => ({ ok: false, status: 400, error: { message: "bad" } }) });
+    const sync = new SyncManager(c, config());
+    await sync.ensureSession("pi-session");
+
+    const result = await sync.syncBranch([
+      { type: "message", message: { role: "user", content: "Poison payload one for watermark test." } },
+      { type: "message", message: { role: "user", content: "Poison payload two for watermark test." } },
+    ]);
+
+    assert.equal(result.added, 2);
+    assert.equal(result.allDelivered, false);
+    assert.equal(sync.syncedCount, 2);
+    assert.equal(calls.length, 1);
+    assert.equal((await listPending()).length, 0);
+  });
+});
+
+test("drainSessionBacklog stops after maxBatches and leaves remainder for later turns", async () => {
+  await withPendingDir(async () => {
+    const previous = process.env.OPENVIKING_PENDING_DRAIN_MAX_BATCHES;
+    process.env.OPENVIKING_PENDING_DRAIN_MAX_BATCHES = "1";
+    try {
+      const { c, calls } = batchClient();
+      const sync = new SyncManager(c, config());
+      await sync.ensureSession("pi-session");
+      const t0 = Date.now();
+      for (let i = 0; i < 250; i++) {
+        await enqueue("addMessage", sync.sessionId, { role: "user", content: `m${i}` }, { createdAt: t0 + i });
+      }
+
+      assert.equal(await sync.flushForTakeover(), false);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].body.messages.length, 100);
+      assert.equal((await listPending()).length, 150);
+    } finally {
+      if (previous === undefined) delete process.env.OPENVIKING_PENDING_DRAIN_MAX_BATCHES;
+      else process.env.OPENVIKING_PENDING_DRAIN_MAX_BATCHES = previous;
+    }
   });
 });

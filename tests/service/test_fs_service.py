@@ -53,6 +53,24 @@ class _FakeVikingFS:
         }
 
 
+@pytest.mark.asyncio
+async def test_stat_forwards_skip_count_without_changing_default(request_context):
+    viking_fs = SimpleNamespace(stat=AsyncMock(return_value={"isDir": True}))
+    service = FSService(viking_fs=viking_fs)
+
+    await service.stat("viking://resources", request_context, skip_count=True)
+    await service.stat("viking://resources", request_context)
+
+    assert viking_fs.stat.await_args_list[0].kwargs == {
+        "ctx": request_context,
+        "skip_count": True,
+    }
+    assert viking_fs.stat.await_args_list[1].kwargs == {
+        "ctx": request_context,
+        "skip_count": False,
+    }
+
+
 class _FakeMutationCoordinator:
     def __init__(self, events=None):
         self.calls = []
@@ -512,18 +530,30 @@ async def test_tagged_grep_reuses_tags_returned_by_viking_fs(request_context):
 
 
 @pytest.mark.asyncio
-async def test_ls_projects_tags_filters_with_and_before_applying_node_limit(request_context):
+async def test_ls_applies_offset_and_node_limit_after_tag_filtering(request_context):
     entries = [
-        {"uri": "viking://resources/a.md", "isDir": False},
+        {
+            "uri": f"viking://resources/unmatched-{index:03d}.md",
+            "isDir": False,
+        }
+        for index in range(256)
+    ] + [
         {"uri": "viking://resources/b.md", "isDir": False},
         {"uri": "viking://resources/c.md", "isDir": False},
     ]
-    viking_fs = SimpleNamespace(ls=AsyncMock(return_value=entries))
+
+    async def fake_ls(*_args, offset=0, node_limit=None, **_kwargs):
+        return entries[offset:] if node_limit is None else entries[offset : offset + node_limit]
+
+    finalized = [{"uri": "viking://resources/c.md", "isDir": False, "abstract": "summary"}]
+    viking_fs = SimpleNamespace(
+        ls=AsyncMock(side_effect=fake_ls),
+        _finalize_listing_entries=AsyncMock(return_value=finalized),
+    )
 
     class FakeVikingDB:
         async def filter(self, **_kwargs):
             return [
-                {"uri": "viking://resources/a.md", "level": 2, "search_tags": ["team=search"]},
                 {
                     "uri": "viking://resources/b.md",
                     "level": 2,
@@ -542,12 +572,19 @@ async def test_ls_projects_tags_filters_with_and_before_applying_node_limit(requ
         ctx=request_context,
         tags=["team=search", "env=prod"],
         node_limit=1,
+        offset=1,
+        output="agent",
     )
 
-    assert result == [
-        {"uri": "viking://resources/b.md", "isDir": False, "tags": ["team=search", "env=prod"]}
+    assert result == finalized
+    assert viking_fs.ls.await_count == 2
+    assert viking_fs.ls.await_args_list[0].kwargs["output"] == "original"
+    assert viking_fs.ls.await_args_list[0].kwargs["node_limit"] == 256
+    assert viking_fs.ls.await_args_list[1].kwargs["offset"] == 256
+    selected = viking_fs._finalize_listing_entries.await_args.args[0]
+    assert selected == [
+        {"uri": "viking://resources/c.md", "isDir": False, "tags": ["team=search", "env=prod"]}
     ]
-    assert viking_fs.ls.await_args.kwargs["node_limit"] is None
 
 
 @pytest.mark.asyncio
@@ -617,7 +654,7 @@ async def test_tree_projects_directory_tags_from_abstract_and_overview_records(r
     assert result == [
         {"uri": "viking://resources/docs", "isDir": True, "tags": ["team=search", "env=prod"]}
     ]
-    assert viking_fs.tree.await_args.kwargs["node_limit"] is None
+    assert viking_fs.tree.await_args.kwargs["node_limit"] == 1000
 
 
 @pytest.mark.asyncio
@@ -768,7 +805,10 @@ async def test_resource_rm_does_not_deactivate_watch_task_control_uri(request_co
 
 
 @pytest.mark.asyncio
-async def test_resource_mv_validates_then_moves_then_rewrites_watch_tasks(request_context):
+@pytest.mark.parametrize("separator", ["/", "//"])
+async def test_resource_mv_validates_then_moves_then_rewrites_watch_tasks(
+    request_context, separator
+):
     events = []
     viking_fs = _FakeVikingFS(events=events)
     watch_manager = _FakeWatchManager(events=events)
@@ -792,8 +832,8 @@ async def test_resource_mv_validates_then_moves_then_rewrites_watch_tasks(reques
     service._enqueue_copy_refresh = enqueue_refresh
 
     await service.mv(
-        "viking://resources/codeask/wiki",
-        "viking://resources/codeask/wiki-renamed",
+        f"viking://resources{separator}codeask/wiki",
+        f"viking://resources{separator}codeask/wiki-renamed",
         ctx=request_context,
     )
 
@@ -904,7 +944,10 @@ async def test_resource_mv_watch_control_file_skips_parent_refresh(request_conte
 
 
 @pytest.mark.asyncio
-async def test_resource_cp_coordinates_mutation_without_copying_watch_tasks(request_context):
+@pytest.mark.parametrize("separator", ["/", "//"])
+async def test_resource_cp_coordinates_mutation_without_copying_watch_tasks(
+    request_context, separator
+):
     source = "viking://resources/codeask/wiki"
     target = "viking://resources/archive/wiki"
     events = []
@@ -930,7 +973,12 @@ async def test_resource_cp_coordinates_mutation_without_copying_watch_tasks(requ
 
     service._enqueue_copy_refresh = enqueue_refresh
 
-    result = await service.cp(source, target, recursive=True, ctx=request_context)
+    result = await service.cp(
+        source.replace("resources/", f"resources{separator}"),
+        target.replace("resources/", f"resources{separator}"),
+        recursive=True,
+        ctx=request_context,
+    )
 
     assert coordinator.calls == [{"account_id": "default", "uris": [source, target]}]
     assert viking_fs.cp_calls == [

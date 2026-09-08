@@ -296,8 +296,11 @@ enum AclCommands {
     },
     Set {
         uri: String,
-        #[arg(long = "entry", required = true)]
+        #[arg(long = "entry")]
         entries: Vec<String>,
+        /// Whether this node uses inherited grants or direct grants only
+        #[arg(long, value_parser = ["inherit", "restricted"])]
+        acl_mode: Option<String>,
     },
     Grant {
         uri: String,
@@ -523,13 +526,41 @@ enum Commands {
         #[arg(
             long = "node-limit",
             short = 'n',
-            alias = "limit",
             default_value = "256",
             value_parser = clap::value_parser!(i32).range(0..),
             value_name = "n",
             help_heading = "Common options"
         )]
         node_limit: i32,
+        /// Number of visible entries to skip
+        #[arg(
+            long,
+            default_value = "0",
+            value_parser = clap::value_parser!(i32).range(0..),
+            value_name = "n",
+            help_heading = "Common options"
+        )]
+        offset: i32,
+        /// Maximum number of visible entries to return
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(i32).range(1..),
+            value_name = "n",
+            help_heading = "Common options"
+        )]
+        limit: Option<i32>,
+        /// Sort entries by name or modification time
+        #[arg(long, value_parser = ["name", "mtime"], value_name = "field", help_heading = "Common options")]
+        sort_by: Option<String>,
+        /// Sort direction
+        #[arg(
+            long,
+            requires = "sort_by",
+            value_parser = ["asc", "desc"],
+            value_name = "order",
+            help_heading = "Common options"
+        )]
+        sort_order: Option<String>,
         /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,locked,id,count,tags,abstract)
         #[arg(short = 'f', long = "fields", value_delimiter = ',', value_name = "FIELDS", help_heading = "Output options")]
         fields: Option<Vec<String>>,
@@ -558,13 +589,29 @@ enum Commands {
         #[arg(
             long = "node-limit",
             short = 'n',
-            alias = "limit",
             default_value = "256",
             value_parser = clap::value_parser!(i32).range(0..),
             value_name = "n",
             help_heading = "Common options"
         )]
         node_limit: i32,
+        /// Number of visible entries to skip
+        #[arg(
+            long,
+            default_value = "0",
+            value_parser = clap::value_parser!(i32).range(0..),
+            value_name = "n",
+            help_heading = "Common options"
+        )]
+        offset: i32,
+        /// Maximum number of visible entries to return
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(i32).range(1..),
+            value_name = "n",
+            help_heading = "Common options"
+        )]
+        limit: Option<i32>,
         /// Maximum depth level to traverse (default: 3)
         #[arg(
             short = 'L',
@@ -1123,24 +1170,9 @@ enum Commands {
         /// Description of this organization task
         #[arg(long, value_name = "text")]
         reason: Option<String>,
-        /// Wait for the Compile task to finish
-        #[arg(long)]
-        wait: bool,
-        /// Local wait timeout in seconds; does not cancel the task
-        #[arg(
-            long,
-            requires = "wait",
-            value_parser = config::parse_positive_timeout,
-            value_name = "seconds"
-        )]
-        timeout: Option<f64>,
-        /// Server-side runtime limit in seconds; reaching it saves partial resource output
-        #[arg(
-            long = "runtime-timeout",
-            value_parser = config::parse_positive_timeout,
-            value_name = "seconds"
-        )]
-        runtime_timeout: Option<f64>,
+        /// Provider arguments as a JSON object
+        #[arg(long, value_name = "json")]
+        args: Option<String>,
     },
 
     // --- Status & Observability ---
@@ -3518,19 +3550,57 @@ async fn main() {
             abs_limit,
             all,
             node_limit,
+            offset,
+            limit,
+            sort_by,
+            sort_order,
             fields,
             tags,
-        } => handlers::handle_ls(uri, simple, recursive, abs_limit, all, node_limit, fields, tags, ctx).await,
+        } => {
+            handlers::handle_ls(
+                uri,
+                simple,
+                recursive,
+                abs_limit,
+                all,
+                node_limit,
+                offset,
+                limit,
+                sort_by,
+                sort_order,
+                fields,
+                tags,
+                ctx,
+            )
+            .await
+        }
         Commands::Tree {
             uri,
             abs_limit,
             all,
             node_limit,
+            offset,
+            limit,
             level_limit,
             simple,
             fields,
             tags,
-        } => handlers::handle_tree(uri, abs_limit, all, node_limit, level_limit, simple, fields, tags, ctx).await,
+        } => {
+            handlers::handle_tree(
+                uri,
+                abs_limit,
+                all,
+                node_limit,
+                offset,
+                limit,
+                level_limit,
+                simple,
+                fields,
+                tags,
+                ctx,
+            )
+            .await
+        }
         Commands::Mkdir { uri, description } => handlers::handle_mkdir(uri, description, ctx).await,
         Commands::Rm {
             uri,
@@ -3594,9 +3664,7 @@ async fn main() {
             to,
             skill,
             reason,
-            wait,
-            timeout,
-            runtime_timeout,
+            args,
         } => {
             let client = ctx.get_client();
             commands::compile::run(
@@ -3605,9 +3673,7 @@ async fn main() {
                 to,
                 skill,
                 reason,
-                wait,
-                timeout,
-                runtime_timeout,
+                args,
                 ctx.output_format,
                 ctx.compact,
             )
@@ -4049,11 +4115,8 @@ mod tests {
             "viking://resources/wiki",
             "--skill",
             "viking://agent/skills/wiki",
-            "--wait",
-            "--timeout",
-            "10",
-            "--runtime-timeout",
-            "86400",
+            "--args",
+            r#"{"model_name":"endpoint-1"}"#,
         ])
         .expect("compile flags should parse");
         match cli.command {
@@ -4061,17 +4124,13 @@ mod tests {
                 from_uris,
                 skill,
                 reason,
-                wait,
-                timeout,
-                runtime_timeout,
+                args,
                 ..
             } => {
                 assert_eq!(from_uris.len(), 3);
                 assert_eq!(skill, "viking://agent/skills/wiki");
                 assert!(reason.is_none());
-                assert!(wait);
-                assert_eq!(timeout, Some(10.0));
-                assert_eq!(runtime_timeout, Some(86_400.0));
+                assert_eq!(args.as_deref(), Some(r#"{"model_name":"endpoint-1"}"#));
             }
             _ => panic!("expected compile command"),
         }
@@ -4084,21 +4143,6 @@ mod tests {
                 "viking://resources/a",
                 "--to",
                 "viking://resources/wiki",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "ov",
-                "compile",
-                "--from",
-                "viking://resources/a",
-                "--to",
-                "viking://resources/wiki",
-                "--skill",
-                "viking://agent/skills/wiki",
-                "--timeout",
-                "10",
             ])
             .is_err()
         );
@@ -4124,8 +4168,61 @@ mod tests {
     #[test]
     fn server_commands_require_existing_cli_config() {
         let cli = Cli::try_parse_from(["ov", "ls"]).expect("ls should parse");
+        let paged_ls = Cli::try_parse_from([
+            "ov",
+            "ls",
+            "--offset",
+            "4",
+            "--limit",
+            "5",
+            "--sort-by",
+            "mtime",
+            "--sort-order",
+            "desc",
+        ])
+        .expect("paged ls should parse");
+        let paged_tree = Cli::try_parse_from([
+            "ov",
+            "tree",
+            "viking://resources",
+            "--offset",
+            "6",
+            "--limit",
+            "7",
+        ])
+        .expect("paged tree should parse");
         let health = Cli::try_parse_from(["ov", "health"]).expect("health should parse");
 
+        match paged_ls.command {
+            Commands::Ls {
+                offset,
+                limit,
+                sort_by,
+                sort_order,
+                node_limit,
+                ..
+            } => {
+                assert_eq!(offset, 4);
+                assert_eq!(limit, Some(5));
+                assert_eq!(sort_by.as_deref(), Some("mtime"));
+                assert_eq!(sort_order.as_deref(), Some("desc"));
+                assert_eq!(node_limit, 256);
+            }
+            _ => panic!("expected ls command"),
+        }
+        match paged_tree.command {
+            Commands::Tree {
+                offset,
+                limit,
+                node_limit,
+                ..
+            } => {
+                assert_eq!(offset, 6);
+                assert_eq!(limit, Some(7));
+                assert_eq!(node_limit, 256);
+            }
+            _ => panic!("expected tree command"),
+        }
         assert!(cli.command.requires_cli_config_file());
         assert!(health.command.requires_cli_config_file());
     }
@@ -4926,18 +5023,6 @@ mod tests {
                 "value",
                 "--timeout",
             ],
-            vec![
-                "ov",
-                "compile",
-                "--from",
-                "viking://resources/source",
-                "--to",
-                "viking://resources/target",
-                "--skill",
-                "viking://user/skills/compiler",
-                "--wait",
-                "--timeout",
-            ],
             vec!["ov", "wait", "--timeout"],
             vec!["ov", "system", "wait", "--timeout"],
         ];
@@ -4995,6 +5080,32 @@ mod tests {
                 Cli::try_parse_from(&args).is_ok(),
                 "{args:?} should accept a positive node limit"
             );
+        }
+
+        for prefix in [
+            vec!["ov", "ls", "--limit"],
+            vec!["ov", "tree", "viking://resources", "--limit"],
+        ] {
+            let mut zero_args = prefix.clone();
+            zero_args.push("0");
+            assert!(Cli::try_parse_from(&zero_args).is_err());
+
+            let mut positive_args = prefix;
+            positive_args.push("1");
+            assert!(Cli::try_parse_from(&positive_args).is_ok());
+        }
+
+        for prefix in [
+            vec!["ov", "ls", "--offset"],
+            vec!["ov", "tree", "viking://resources", "--offset"],
+        ] {
+            let mut negative_args = prefix.clone();
+            negative_args.push("-1");
+            assert!(Cli::try_parse_from(&negative_args).is_err());
+
+            let mut zero_args = prefix;
+            zero_args.push("0");
+            assert!(Cli::try_parse_from(&zero_args).is_ok());
         }
     }
 
