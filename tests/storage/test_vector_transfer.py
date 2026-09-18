@@ -296,6 +296,12 @@ async def test_copy_uri_mapping_scans_real_local_path_records(tmp_path):
         assert result.scanned == 1
         copied = await backend.get_context_by_uri(target, ctx=_ctx())
         assert [record["uri"] for record in copied] == [target]
+
+        first_page, cursor = await backend.scroll(limit=1, ctx=_ctx())
+        assert cursor is not None
+        last_page, cursor = await backend.scroll(limit=2, cursor=cursor, ctx=_ctx())
+        assert cursor is None
+        assert [record["uri"] for record in first_page + last_page] == [source, target]
     finally:
         await backend.close()
 

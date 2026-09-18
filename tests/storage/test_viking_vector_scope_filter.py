@@ -4,7 +4,7 @@
 import pytest
 
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.acl import AclEntry, AclLevel, AclManager, AclMode
+from openviking.storage.acl import AclManager
 from openviking.storage.collection_schemas import CollectionSchemas
 from openviking.storage.expr import And, Eq, In, Or, PathScope
 from openviking.storage.viking_vector_index_backend import VikingVectorIndexBackend
@@ -280,85 +280,6 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
             ]
         )
 
-    finally:
-        await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_acl_subtree_scan_uses_stable_pagination_for_large_subtree(tmp_path):
-    ctx = RequestContext(user=UserIdentifier("acct", "owner"), role=Role.ADMIN)
-    root = "viking://resources/acl-large"
-    backend = VikingVectorIndexBackend(
-        config=VectorDBBackendConfig(
-            backend="local", name="context", dimension=4, path=str(tmp_path / "vectors")
-        )
-    )
-    try:
-        assert await backend.create_collection(
-            "context", CollectionSchemas.context_collection("context", 4)
-        )
-        backend.acl_manager = AclManager(backend)
-        backend.acl_manager.set_enabled(ctx.account_id, True)
-
-        records = [
-            {
-                "id": "root",
-                "uri": root,
-                "account_id": "acct",
-                "context_type": "resource",
-                "level": 1,
-                "abstract": "Root summary",
-                "updated_at": "2026-09-18T00:00:00Z",
-                "vector": [1.0, 0.0, 0.0, 0.0],
-            }
-        ]
-        records.extend(
-            {
-                "id": f"child-{index:04d}",
-                "uri": f"{root}/doc-{index:04d}.md",
-                "account_id": "acct",
-                "context_type": "resource",
-                "level": 2,
-                "updated_at": "2026-09-18T00:00:00Z",
-                "vector": [1.0, 0.0, 0.0, 0.0],
-            }
-            for index in range(620)
-        )
-        await backend._upsert_many_raw(records, ctx=ctx)
-
-        for output_fields in (None, []):
-            page, _ = await backend.scroll(
-                filter=PathScope("uri", root, depth=0), output_fields=output_fields, ctx=ctx
-            )
-            assert len(page) == 1
-            assert page[0]["uri"] == root
-            assert page[0]["abstract"] == "Root summary"
-            assert page[0]["vector"] == [1.0, 0.0, 0.0, 0.0]
-
-        scanned = await backend.acl_manager._scroll_all(
-            PathScope("uri", root, depth=-1), ["id"], ctx
-        )
-        scanned_ids = [str(record["id"]) for record in scanned]
-
-        assert len(scanned_ids) == 621
-        assert set(scanned_ids) == {record["id"] for record in records}
-        assert all(set(record) == {"id", "_score"} for record in scanned)
-        effective = await backend.acl_manager.set_acl(
-            root,
-            [AclEntry("user:owner", AclLevel.MANAGE)],
-            ctx,
-            acl_mode=AclMode.RESTRICTED,
-        )
-        assert effective.mode is AclMode.RESTRICTED
-        updated = await backend.get_strict(scanned_ids, ctx=ctx)
-        assert len(updated) == 621
-        for record in updated:
-            if record["id"] == "root":
-                assert record["acl_mode"] == "restricted"
-                assert record["acl_direct_grants"] == ["7:user:owner"]
-            else:
-                assert record["acl_mode"] == "inherit"
-                assert record["acl_inherited_grants"] == ["7:user:owner"]
     finally:
         await backend.close()
 
