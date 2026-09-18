@@ -3,6 +3,7 @@
 """Aider RepoMap-style skeleton extraction using vendored tags queries."""
 
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,27 @@ _LANG_ALIASES = {
 
 def _query_language_name(lang: str) -> str:
     return _LANG_ALIASES.get(lang, lang)
+
+
+@lru_cache(maxsize=1)
+def _downloaded_query_languages() -> frozenset[str]:
+    try:
+        from tree_sitter_language_pack import PackConfig, configure, downloaded_languages
+
+        cache_dir = os.environ.get("OPENVIKING_TREE_SITTER_CACHE_DIR")
+        if cache_dir:
+            if not Path(cache_dir).is_dir():
+                logger.warning("Configured tree-sitter parser cache does not exist: %s", cache_dir)
+                return frozenset()
+            configure(PackConfig(cache_dir=cache_dir))
+        return frozenset(downloaded_languages())
+    except Exception as exc:
+        logger.warning("Failed to inspect tree-sitter parser cache: %s", exc)
+        return frozenset()
+
+
+def _is_query_language_preloaded(lang: str) -> bool:
+    return lang in _downloaded_query_languages()
 
 
 @lru_cache(maxsize=None)
@@ -66,12 +88,23 @@ def _extract_with_grep_ast(
     verbose: bool,
 ) -> Optional[str]:
     try:
+        from grep_ast import filename_to_lang
         from grep_ast import TreeContext
     except Exception as exc:
         logger.warning("grep-ast RepoMap extractor unavailable: %s", exc)
         return None
 
     try:
+        lang = filename_to_lang(rel_name)
+        query_lang = _query_language_name(lang) if lang else None
+        if not query_lang or not _is_query_language_preloaded(query_lang):
+            logger.info(
+                "tree-sitter grammar is not preloaded for '%s' (language: %s); falling back",
+                file_name,
+                query_lang or lang,
+            )
+            return None
+
         _, captures = _query_captures(rel_name, content)
         def_lines = _definition_lines(captures)
         if not def_lines:
@@ -127,6 +160,9 @@ def _query_captures(rel_name: str, content: str):
         raise ValueError(f"missing tags query for language: {lang}")
 
     query_lang = _query_language_name(lang)
+    if not _is_query_language_preloaded(query_lang):
+        raise ValueError(f"tree-sitter grammar is not preloaded: {query_lang}")
+
     parser = get_parser(query_lang)
     language = get_language(query_lang)
     tree = parser.parse(content.encode("utf-8"))
