@@ -1309,6 +1309,16 @@ class ResourceService:
         # lock still rejects compliant concurrent writers, and cleanup rechecks
         # that the target is empty before deleting it.
         target_preexisting = await self._viking_fs.exists(root_uri, ctx=ctx)
+        if to_is_directory and target_preexisting:
+            target_stat = await self._viking_fs.stat(root_uri, ctx=ctx, skip_count=True)
+            if not target_stat.get("isDir"):
+                raise FailedPreconditionError(
+                    "Target URI already exists as a file and cannot be used as a "
+                    f"resource directory: {root_uri}. Choose another URI, use "
+                    "'parent' to add a new resource under a directory, or use "
+                    "content/write to update the existing file.",
+                    details={"resource": root_uri, "type": "file"},
+                )
         dst_path = self._viking_fs._uri_to_path(root_uri, ctx=ctx)
         resource_lock = await self._viking_fs._async_agfs.pathlock_acquire_tree(
             dst_path,
@@ -1316,16 +1326,6 @@ class ResourceService:
         )
         try:
             await self._viking_fs._ensure_access(root_uri, ctx, action=AclAction.WRITE)
-            if to_is_directory and await self._viking_fs.exists(root_uri, ctx=ctx):
-                target_stat = await self._viking_fs.stat(root_uri, ctx=ctx, skip_count=True)
-                if not target_stat.get("isDir"):
-                    raise FailedPreconditionError(
-                        "Target URI already exists as a file and cannot be used as a "
-                        f"resource directory: {root_uri}. Choose another 'to', use "
-                        "'parent' to add a new resource under a directory, or use "
-                        "content/write to update the existing file.",
-                        details={"resource": root_uri, "type": "file"},
-                    )
         except BaseException:
             await self._release_lock_ref(resource_lock)
             raise

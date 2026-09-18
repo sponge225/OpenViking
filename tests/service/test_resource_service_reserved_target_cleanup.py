@@ -107,9 +107,13 @@ async def test_explicit_target_plan_tracks_reservation_ownership(
     async def ensure_access(*args, **kwargs):
         calls.append("acl")
 
+    async def target_stat(*args, **kwargs):
+        calls.append("stat")
+        return {"isDir": True}
+
     viking_fs = SimpleNamespace(
         exists=AsyncMock(side_effect=target_exists),
-        stat=AsyncMock(return_value={"isDir": True}),
+        stat=AsyncMock(side_effect=target_stat),
         _ensure_access=AsyncMock(side_effect=ensure_access),
         _uri_to_path=lambda uri, ctx: f"/agfs/{uri}",
         _async_agfs=SimpleNamespace(pathlock_acquire_tree=AsyncMock(side_effect=acquire_lock)),
@@ -142,7 +146,11 @@ async def test_explicit_target_plan_tracks_reservation_ownership(
         False,
         cleanup_empty_target_on_failure,
     )
-    assert calls == ["acl", "exists", "lock", "acl", "exists"]
+    expected_calls = ["acl", "exists"]
+    if target_preexisting:
+        expected_calls.append("stat")
+    expected_calls.extend(["lock", "acl"])
+    assert calls == expected_calls
 
 
 @pytest.mark.asyncio
@@ -191,7 +199,8 @@ async def test_explicit_directory_target_rejects_existing_file():
         ctx=ctx,
         skip_count=True,
     )
-    async_agfs.pathlock_release.assert_awaited_once_with(lock)
+    async_agfs.pathlock_acquire_tree.assert_not_awaited()
+    async_agfs.pathlock_release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
