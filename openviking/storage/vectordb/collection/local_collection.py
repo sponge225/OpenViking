@@ -752,9 +752,9 @@ class LocalCollection(ICollection):
             new_filters["filter"] = filters
 
         # Copy output_fields to avoid modifying the original list
-        if output_fields is None:
-            output_fields_copy = [field]
-            remove_field = True
+        if not output_fields:
+            output_fields_copy = None
+            remove_field = False
         else:
             output_fields_copy = list(output_fields)
             if field not in output_fields_copy:

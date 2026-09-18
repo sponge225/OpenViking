@@ -307,6 +307,8 @@ async def test_acl_subtree_scan_uses_stable_pagination_for_large_subtree(tmp_pat
                 "account_id": "acct",
                 "context_type": "resource",
                 "level": 1,
+                "abstract": "Root summary",
+                "updated_at": "2026-09-18T00:00:00Z",
                 "vector": [1.0, 0.0, 0.0, 0.0],
             }
         ]
@@ -317,11 +319,21 @@ async def test_acl_subtree_scan_uses_stable_pagination_for_large_subtree(tmp_pat
                 "account_id": "acct",
                 "context_type": "resource",
                 "level": 2,
+                "updated_at": "2026-09-18T00:00:00Z",
                 "vector": [1.0, 0.0, 0.0, 0.0],
             }
             for index in range(620)
         )
         await backend._upsert_many_raw(records, ctx=ctx)
+
+        for output_fields in (None, []):
+            page, _ = await backend.scroll(
+                filter=PathScope("uri", root, depth=0), output_fields=output_fields, ctx=ctx
+            )
+            assert len(page) == 1
+            assert page[0]["uri"] == root
+            assert page[0]["abstract"] == "Root summary"
+            assert page[0]["vector"] == [1.0, 0.0, 0.0, 0.0]
 
         scanned = await backend.acl_manager._scroll_all(
             PathScope("uri", root, depth=-1), ["id"], ctx
@@ -329,7 +341,8 @@ async def test_acl_subtree_scan_uses_stable_pagination_for_large_subtree(tmp_pat
         scanned_ids = [str(record["id"]) for record in scanned]
 
         assert len(scanned_ids) == 621
-        assert len(set(scanned_ids)) == 621
+        assert set(scanned_ids) == {record["id"] for record in records}
+        assert all(set(record) == {"id", "_score"} for record in scanned)
         effective = await backend.acl_manager.set_acl(
             root,
             [AclEntry("user:owner", AclLevel.MANAGE)],
@@ -337,6 +350,15 @@ async def test_acl_subtree_scan_uses_stable_pagination_for_large_subtree(tmp_pat
             acl_mode=AclMode.RESTRICTED,
         )
         assert effective.mode is AclMode.RESTRICTED
+        updated = await backend.get_strict(scanned_ids, ctx=ctx)
+        assert len(updated) == 621
+        for record in updated:
+            if record["id"] == "root":
+                assert record["acl_mode"] == "restricted"
+                assert record["acl_direct_grants"] == ["7:user:owner"]
+            else:
+                assert record["acl_mode"] == "inherit"
+                assert record["acl_inherited_grants"] == ["7:user:owner"]
     finally:
         await backend.close()
 

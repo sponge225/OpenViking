@@ -604,29 +604,6 @@ class _SingleAccountBackend:
             order_desc=order_desc,
         )
 
-    async def strict_scroll(
-        self,
-        filter: Optional[Dict[str, Any] | FilterExpr] = None,
-        limit: int = 100,
-        cursor: Optional[str] = None,
-        output_fields: Optional[List[str]] = None,
-    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
-        """Return a stable URI-ordered page for a transactional scan."""
-        offset = int(cursor) if cursor else 0
-        records = await self.strict_query(
-            filter=filter,
-            limit=limit,
-            offset=offset,
-            output_fields=output_fields,
-            # The local engine's scalar sorter does not return records for
-            # path/string fields. ``updated_at`` is an indexed date-time field
-            # on every context collection and provides stable offset pages.
-            order_by="updated_at",
-            order_desc=False,
-        )
-        next_cursor = str(offset + len(records)) if len(records) == limit else None
-        return records, next_cursor
-
     async def strict_count(self, filter: Optional[Dict[str, Any] | FilterExpr] = None) -> int:
         """Count transaction records without converting backend errors to zero."""
         return int(
@@ -800,22 +777,20 @@ class _SingleAccountBackend:
         cursor: Optional[str] = None,
         output_fields: Optional[List[str]] = None,
     ) -> tuple[List[Dict[str, Any]], Optional[str]]:
-        """Scroll records without converting backend failures into an empty page."""
-        if isinstance(filter, dict):
-            filter = RawDSL(filter)
-        if self._bound_account_id:
-            account_filter = Eq("account_id", self._bound_account_id)
-            filter = And([account_filter, filter]) if filter else account_filter
-
+        """Return an updated_at-ordered page and propagate backend failures."""
         offset = int(cursor) if cursor else 0
-        records = await self._async_adapter.call(
-            "query",
+        records = await self.strict_query(
             filter=filter,
             limit=limit,
             offset=offset,
             output_fields=output_fields,
+            # The local engine's scalar sorter does not return records for
+            # path/string fields. ``updated_at`` is an indexed date-time field
+            # on every context collection and provides stable offset pages.
+            order_by="updated_at",
+            order_desc=False,
         )
-        next_cursor = str(offset + limit) if len(records) == limit else None
+        next_cursor = str(offset + len(records)) if len(records) == limit else None
         return records, next_cursor
 
     async def count(self, filter: Optional[Dict[str, Any] | FilterExpr] = None) -> int:
@@ -1388,7 +1363,7 @@ class VikingVectorIndexBackend:
         ctx: RequestContext,
     ) -> tuple[List[Dict[str, Any]], Optional[str]]:
         backend = self._get_backend_for_context(ctx)
-        return await backend.strict_scroll(
+        return await backend.scroll(
             filter=filter,
             limit=limit,
             cursor=cursor,
@@ -1405,7 +1380,7 @@ class VikingVectorIndexBackend:
         output_fields: List[str],
     ) -> tuple[List[Dict[str, Any]], Optional[str]]:
         backend = self._get_backend_for_context(ctx)
-        return await backend.strict_scroll(
+        return await backend.scroll(
             filter=filter,
             limit=limit,
             cursor=cursor,
