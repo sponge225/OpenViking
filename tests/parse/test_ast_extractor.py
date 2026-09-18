@@ -86,7 +86,7 @@ def test_no_tags_uses_process(monkeypatch):
 def test_process_cache_miss_skips_runtime_download(monkeypatch):
     process = Mock(side_effect=AssertionError("process must not download at runtime"))
     monkeypatch.setattr(
-        "openviking.parse.parsers.code.ast.process_engine._is_process_language_preloaded",
+        "openviking.parse.parsers.code.ast.process_engine._is_tree_sitter_language_preloaded",
         lambda _lang: False,
     )
     monkeypatch.setattr(
@@ -103,7 +103,7 @@ def test_tags_query_cache_miss_skips_runtime_download(monkeypatch):
 
     get_parser = Mock(side_effect=AssertionError("get_parser must not download at runtime"))
     monkeypatch.setattr(
-        "openviking.parse.parsers.code.ast.aider_repomap._is_query_language_preloaded",
+        "openviking.parse.parsers.code.ast.aider_repomap._is_tree_sitter_language_preloaded",
         lambda _lang: False,
     )
     monkeypatch.setattr(tsl, "get_parser", get_parser)
@@ -171,7 +171,7 @@ def test_tags_query_rendered_skeleton_is_useful_after_cleaning(monkeypatch):
         process,
     )
     monkeypatch.setattr(
-        "openviking.parse.parsers.code.ast.aider_repomap._is_query_language_preloaded",
+        "openviking.parse.parsers.code.ast.aider_repomap._is_tree_sitter_language_preloaded",
         lambda _lang: True,
     )
     content = """#include <stdio.h>
@@ -202,7 +202,7 @@ static void run(void) {
 @pytest.mark.parametrize("file_name", ["sample.cpp", "kernel.cu"])
 def test_cpp_tags_capture_top_level_function_template_declarations_only(file_name, monkeypatch):
     monkeypatch.setattr(
-        "openviking.parse.parsers.code.ast.aider_repomap._is_query_language_preloaded",
+        "openviking.parse.parsers.code.ast.aider_repomap._is_tree_sitter_language_preloaded",
         lambda _lang: True,
     )
     content = """#include <vector>
@@ -233,7 +233,7 @@ def test_ocaml_interface_tags_capture_interface_structures(monkeypatch):
         process,
     )
     monkeypatch.setattr(
-        "openviking.parse.parsers.code.ast.aider_repomap._is_query_language_preloaded",
+        "openviking.parse.parsers.code.ast.aider_repomap._is_tree_sitter_language_preloaded",
         lambda _lang: True,
     )
     content = """type user = {
@@ -282,7 +282,7 @@ val create : id:string -> name:string -> user
 )
 def test_process_smoke(file_name, content, symbol, monkeypatch):
     monkeypatch.setattr(
-        "openviking.parse.parsers.code.ast.process_engine._is_process_language_preloaded",
+        "openviking.parse.parsers.code.ast.process_engine._is_tree_sitter_language_preloaded",
         lambda _lang: True,
     )
     text = extract_process_skeleton(file_name, content)

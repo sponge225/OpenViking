@@ -121,7 +121,7 @@ def _display_language(lang: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def _downloaded_process_languages() -> frozenset[str]:
+def _downloaded_tree_sitter_languages() -> frozenset[str]:
     try:
         from tree_sitter_language_pack import PackConfig, configure, downloaded_languages
 
@@ -137,8 +137,8 @@ def _downloaded_process_languages() -> frozenset[str]:
         return frozenset()
 
 
-def _is_process_language_preloaded(lang: str) -> bool:
-    return lang in _downloaded_process_languages()
+def _is_tree_sitter_language_preloaded(lang: str) -> bool:
+    return lang in _downloaded_tree_sitter_languages()
 
 
 def _detect_process_language(file_name: str) -> Optional[str]:
@@ -201,7 +201,7 @@ def extract_process_skeleton(
     lang = _detect_process_language(file_name)
     if lang is None:
         return None
-    if not _is_process_language_preloaded(lang):
+    if not _is_tree_sitter_language_preloaded(lang):
         logger.info(
             "tree-sitter grammar is not preloaded for '%s' (language: %s); falling back",
             file_name,
