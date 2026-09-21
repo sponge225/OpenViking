@@ -294,7 +294,6 @@ Python `get_stats()` 保留原有微秒字段。
 | 指标族 | 类型 | 常见标签 | 含义 |
 |--------|------|----------|------|
 | `openviking_session_lifecycle_total` | Counter | `account_id, action, status` | session 生命周期事件次数 |
-| `openviking_session_contexts_used_total` | Counter | `account_id, action` | session contexts used 累计量 |
 | `openviking_session_archive_total` | Counter | `account_id, status` | session archive 次数 |
 
 ### Feedback

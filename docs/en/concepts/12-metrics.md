@@ -291,7 +291,6 @@ Python `get_stats()` retains its microsecond fields.
 | Metric Family | Type | Common Labels | Meaning |
 |---------------|------|---------------|---------|
 | `openviking_session_lifecycle_total` | Counter | `account_id, action, status` | session lifecycle event count |
-| `openviking_session_contexts_used_total` | Counter | `account_id, action` | session contexts used total |
 | `openviking_session_archive_total` | Counter | `account_id, status` | session archive count |
 
 ### Feedback

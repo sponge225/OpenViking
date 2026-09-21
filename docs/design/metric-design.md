@@ -301,7 +301,7 @@ graph LR
 | --- | --- | --- | --- | --- |
 | `HttpRequestLifecycleDataSource` | `EventMetricDataSource` | FastAPI middleware、路由响应 | 请求生命周期事件 | request total、duration、status code、in-flight |
 | `ResourceIngestionEventDataSource` | `EventMetricDataSource` | ResourceProcessor、ResourceService、watch / wait 流程 | 资源处理事件与阶段摘要 | parse / finalize / summarize / wait / watch duration |
-| `SessionLifecycleDataSource` | `EventMetricDataSource` | session create / used / commit / archive | 会话生命周期状态与事件 | commit 生命周期、contexts_used、archive 状态 |
+| `SessionLifecycleDataSource` | `EventMetricDataSource` | session create / commit / archive | 会话生命周期状态与事件 | commit 生命周期、archive 状态 |
 | `EncryptionEventDataSource` | `EventMetricDataSource` | Encryptor、API Key 验证路径、KDF / Key Loader | 加密操作事件与密钥处理事件 | encrypt / decrypt / verify count、duration、bytes、kdf / key_load 耗时、auth_failed |
 | `QueuePipelineStateDataSource` | `StateMetricDataSource` | `QueueManager`、Semantic tree、request queue stats | 队列与流水线状态 | pending、in_progress、processed、error_count、semantic_nodes |
 | `TaskStateDataSource` | `StateMetricDataSource` | `TaskTracker` | 当前任务状态 | pending、running、completed、failed 数量 |
@@ -817,7 +817,7 @@ sequenceDiagram
 | HTTP | `openviking_http_requests_total`、`openviking_http_request_duration_seconds`、`openviking_http_inflight_requests` |
 | Retrieval | `openviking_retrieval_requests_total`、`openviking_retrieval_results_total`、`openviking_retrieval_zero_result_total`、`openviking_retrieval_latency_seconds`、`openviking_retrieval_rerank_used_total`、`openviking_retrieval_rerank_fallback_total` |
 | Resource | `openviking_resource_stage_total`、`openviking_resource_stage_duration_seconds`、`openviking_resource_wait_duration_seconds` |
-| Session | `openviking_session_lifecycle_total`、`openviking_session_contexts_used_total`、`openviking_session_archive_total` |
+| Session | `openviking_session_lifecycle_total`、`openviking_session_archive_total` |
 | Operation Telemetry | `openviking_operation_requests_total`、`openviking_operation_duration_seconds`、`openviking_operation_tokens_total` |
 | VLM | `openviking_vlm_calls_total`、`openviking_vlm_call_duration_seconds`、`openviking_vlm_tokens_input_total`、`openviking_vlm_tokens_output_total`、`openviking_vlm_tokens_total` |
 | Embedding | `openviking_embedding_requests_total`、`openviking_embedding_latency_seconds`、`openviking_embedding_errors_total` |
