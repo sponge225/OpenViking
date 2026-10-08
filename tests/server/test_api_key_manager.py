@@ -647,6 +647,34 @@ async def test_default_account_exists(manager: APIKeyManager):
     assert any(a["account_id"] == "default" for a in accounts)
 
 
+async def test_load_does_not_replace_registry_after_transient_not_found(
+    manager: APIKeyManager,
+    manager_service,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    survivor = _uid()
+    key = await manager.create_account(survivor, "alice")
+    reader = APIKeyManager(root_key=ROOT_KEY, viking_fs=manager_service.viking_fs)
+    read = reader._legacy._async_agfs.read
+    before = await read(ACCOUNTS_PATH)
+    missing_reads = 0
+
+    async def missing_once(path, *args, **kwargs):
+        nonlocal missing_reads
+        if path == ACCOUNTS_PATH and missing_reads == 0:
+            missing_reads += 1
+            raise AGFSNotFoundError("injected transient missing registry read")
+        return await read(path, *args, **kwargs)
+
+    monkeypatch.setattr(reader._legacy._async_agfs, "read", missing_once)
+
+    await reader.load()
+
+    assert missing_reads == 1
+    assert await read(ACCOUNTS_PATH) == before
+    assert reader.resolve(key).account_id == survivor
+
+
 @pytest.mark.parametrize("operation", ["create", "delete", "trusted"])
 async def test_account_mutation_preserves_registry_when_baseline_is_missing(
     manager: APIKeyManager, monkeypatch: pytest.MonkeyPatch, operation: str

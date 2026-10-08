@@ -160,8 +160,18 @@ class LegacyAPIKeyManager:
             if accounts_data is None:
                 # First run: create default account
                 now = datetime.now(timezone.utc).isoformat()
-                accounts_data = {"accounts": {"default": {"created_at": now}}}
-                await self._write_json(ACCOUNTS_PATH, accounts_data)
+                initial_data = {"accounts": {"default": {"created_at": now}}}
+                try:
+                    await self._write_json(ACCOUNTS_PATH, initial_data, create_new=True)
+                    accounts_data = initial_data
+                except AGFSAlreadyExistsError:
+                    # The first read may have raced another initializer or observed
+                    # a transient not-found. Never replace an existing registry.
+                    accounts_data = await self._read_json(ACCOUNTS_PATH)
+                    if accounts_data is None:
+                        raise FailedPreconditionError(
+                            "Account registry exists but could not be read after initialization."
+                        )
 
             accounts, prefix_index, user_group_ids = await self._build_state(
                 accounts_data, allow_migration=True
@@ -1400,18 +1410,24 @@ class LegacyAPIKeyManager:
         fs_ctx["lease_ref"] = ref
         return fs_ctx
 
-    async def _write_json(self, path: str, data: dict, lease_ref: object | None = None) -> None:
+    async def _write_json(
+        self,
+        path: str,
+        data: dict,
+        lease_ref: object | None = None,
+        *,
+        create_new: bool = False,
+    ) -> None:
         """Write a JSON file to AGFS with encryption support."""
         content = json.dumps(data, ensure_ascii=False, indent=2)
         if isinstance(content, str):
             content = content.encode("utf-8")
 
         await self._ensure_parent_dirs_async(path)
-        await self._async_agfs.write(
-            path,
-            content,
-            fs_ctx=self._fs_ctx_with_lease(path, lease_ref),
-        )
+        kwargs: Dict[str, object] = {"fs_ctx": self._fs_ctx_with_lease(path, lease_ref)}
+        if create_new:
+            kwargs["create_new"] = True
+        await self._async_agfs.write(path, content, **kwargs)
 
     async def _ensure_parent_dirs_async(self, path: str) -> None:
         """Recursively create all parent directories for a file path."""

@@ -175,16 +175,21 @@ class AsyncAGFSClient:
         *,
         fs_ctx: Dict[str, str] | None = None,
         auto_pathlock: bool = True,
+        create_new: bool = False,
     ) -> str:
         """Write file content to AGFS.
 
         1. Automatic PathLock is enabled by default to prevent data conflicts in concurrent scenarios.
         2. If automatic PathLock is disabled, the caller must assess the possible data conflict risk.
+        3. If ``create_new`` is true, fail instead of replacing an existing file.
         """
         ctx = _fs_ctx_with_auto_pathlock(path, fs_ctx, auto_pathlock)
+        kwargs: Dict[str, Any] = {"ctx": ctx}
+        if create_new:
+            kwargs["create_new"] = True
         if max_retries == 3:
-            return await self.run("write", path, data, ctx=ctx)
-        return await self.run("write", path, data, max_retries=max_retries, ctx=ctx)
+            return await self.run("write", path, data, **kwargs)
+        return await self.run("write", path, data, max_retries=max_retries, **kwargs)
 
     async def mkdir(
         self, path: str, mode: str = "755", *, fs_ctx: Dict[str, str] | None = None

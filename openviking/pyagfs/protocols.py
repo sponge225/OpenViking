@@ -69,6 +69,8 @@ class AGFSSyncClientProtocol(Protocol):
         path: str,
         data: bytes | Iterator[bytes] | BinaryIO,
         max_retries: int = 3,
+        *,
+        create_new: bool = False,
     ) -> str:
         """Write file content to AGFS and return the backend result."""
 

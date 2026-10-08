@@ -100,6 +100,19 @@ def test_health_reports_git_enabled(client):
     assert h.get("git_backend") == "local"
 
 
+def test_write_create_new_never_replaces_existing_file(client):
+    from openviking.pyagfs import AGFSAlreadyExistsError
+
+    path = "/local/acct1/_system/accounts.json"
+    client.ensure_parent_dirs(path)
+    client.write(path, b"original", create_new=True)
+
+    with pytest.raises(AGFSAlreadyExistsError):
+        client.write(path, b"replacement", create_new=True)
+
+    assert client.read(path) == b"original"
+
+
 def test_commit_then_show_roundtrip(client):
     """Write a file, commit it, then show it back and verify bytes match."""
     account = "acct1"

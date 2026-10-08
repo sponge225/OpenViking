@@ -1910,7 +1910,7 @@ impl RAGFSBindingClient {
     ///     path: File path
     ///     data: File content as bytes
     ///     ctx: Optional FsContext dict (e.g. {"account_id": ...})
-    #[pyo3(signature = (path, data, max_retries=3, ctx=None))]
+    #[pyo3(signature = (path, data, max_retries=3, ctx=None, *, create_new=false))]
     fn write(
         &self,
         py: Python<'_>,
@@ -1918,13 +1918,19 @@ impl RAGFSBindingClient {
         data: Vec<u8>,
         max_retries: i32,
         ctx: Option<HashMap<String, String>>,
+        create_new: bool,
     ) -> PyResult<String> {
         let _ = max_retries; // not applicable for local binding
         let fs_ctx = build_fs_context(ctx);
         let top = self.top.clone();
         let len = data.len();
+        let flag = if create_new {
+            WriteFlag::CreateNew
+        } else {
+            WriteFlag::Create
+        };
         self.run_scoped(py, fs_ctx, move || async move {
-            top.write(&path, &data, 0, WriteFlag::Create).await
+            top.write(&path, &data, 0, flag).await
         })
         .map_err(to_py_err)?;
 

@@ -115,6 +115,26 @@ async def test_async_client_preserves_explicit_fs_ctx() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_client_forwards_create_new_only_when_requested() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _CreateNewClient:
+        def write(self, _path: str, _data: bytes, **kwargs: Any) -> str:
+            calls.append(kwargs)
+            return "written"
+
+    agfs = AsyncAGFSClient(_CreateNewClient())
+
+    await agfs.write("/local/_system/existing.json", b"existing")
+    await agfs.write("/local/_system/new.json", b"new", create_new=True)
+
+    assert calls == [
+        {"ctx": {"account_id": "_system"}},
+        {"ctx": {"account_id": "_system"}, "create_new": True},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_async_client_rejects_cross_account_mv() -> None:
     client = _RecordingClient()
     agfs = AsyncAGFSClient(client)
