@@ -983,7 +983,11 @@ class OpenAPIChannel(BaseChannel):
             actor_peer_id=request.headers.get("X-OpenViking-Actor-Peer", ""),
         )
 
-    async def _resolve_trusted_connection(self, request: Request) -> dict[str, Any] | None:
+    async def _resolve_trusted_connection(
+        self,
+        request: Request,
+        auth: GatewayRequestAuth,
+    ) -> dict[str, Any] | None:
         if not self._ov_server_url():
             return None
         api_key = self._extract_api_key(request)
@@ -992,6 +996,14 @@ class OpenAPIChannel(BaseChannel):
         ).strip()
         if not api_key and configured_api_key:
             raise HTTPException(status_code=401, detail="OpenViking API key header required")
+        if not configured_api_key and not api_key and not auth.can_trust_forwarded_connection:
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Trusted OpenViking identity requires a trusted local proxy "
+                    "or configured root API key"
+                ),
+            )
         account_id = str(request.headers.get("X-OpenViking-Account") or "").strip()
         user_id = str(request.headers.get("X-OpenViking-User") or "").strip()
         if not account_id or not user_id:
@@ -1181,7 +1193,7 @@ class OpenAPIChannel(BaseChannel):
             self._assert_runtime_health_mode(health)
             connection = self._resolve_api_key_connection(http_request, health)
         elif auth_mode == "trusted":
-            connection = await self._resolve_trusted_connection(http_request)
+            connection = await self._resolve_trusted_connection(http_request, auth)
         else:
             raise HTTPException(
                 status_code=503,
