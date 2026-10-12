@@ -3,6 +3,7 @@
 """Grep and search-backend mixin for VikingFS."""
 
 import asyncio
+import posixpath
 import re
 import sys
 import time
@@ -11,7 +12,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from openviking.core.namespace import is_session_uri
 from openviking.pyagfs.exceptions import AGFSNotSupportedError
 from openviking.server.identity import RequestContext
-from openviking.storage.expr import And, PathScope, RawDSL
+from openviking.storage.acl import is_acl_uri
+from openviking.storage.expr import And, Eq, PathScope, RawDSL
 from openviking.storage.viking_fs._base import logger
 from openviking_cli.exceptions import PermissionDeniedError
 from openviking_cli.utils.config.grep_config import GrepEngine
@@ -288,11 +290,10 @@ class _GrepMixin:
         after_context=0,
     ):
         """Filesystem grep path: prefer native agfs grep and fall back if unavailable."""
-        native_safe = (
-            content_transform is None
-            and allowed_uris is None
-            and await self._session_native_grep_safe(uri, ctx)
+        allowed_paths, visible_uris = await self._grep_allowed_paths(
+            uri, ctx, level_limit, allowed_uris
         )
+        native_safe = content_transform is None and await self._session_native_grep_safe(uri, ctx)
         if native_safe:
             try:
                 # Session grep historically used the Python fallback, where
@@ -304,17 +305,20 @@ class _GrepMixin:
                     if is_session_uri(uri) and level_limit is not None
                     else level_limit
                 )
-                return await self._grep_with_agfs(
-                    uri=uri,
-                    pattern=pattern,
-                    exclude_uri=exclude_uri,
-                    case_insensitive=case_insensitive,
-                    node_limit=node_limit,
-                    level_limit=native_level_limit,
-                    ctx=ctx,
-                    before_context=before_context,
-                    after_context=after_context,
-                )
+                native_kwargs = {
+                    "uri": uri,
+                    "pattern": pattern,
+                    "exclude_uri": exclude_uri,
+                    "case_insensitive": case_insensitive,
+                    "node_limit": node_limit,
+                    "level_limit": native_level_limit,
+                    "ctx": ctx,
+                    "before_context": before_context,
+                    "after_context": after_context,
+                }
+                if allowed_paths is not None:
+                    native_kwargs["allowed_paths"] = allowed_paths
+                return await self._grep_with_agfs(**native_kwargs)
             except (AttributeError, AGFSNotSupportedError, NotImplementedError) as e:
                 logger.debug(f"agfs grep unavailable, falling back to VikingFS implementation: {e}")
 
@@ -327,10 +331,54 @@ class _GrepMixin:
             level_limit=level_limit,
             ctx=ctx,
             content_transform=content_transform,
-            allowed_uris=allowed_uris,
+            allowed_uris=visible_uris,
             before_context=before_context,
             after_context=after_context,
         )
+
+    async def _grep_allowed_paths(
+        self,
+        uri: str,
+        ctx: Optional[RequestContext],
+        level_limit: int,
+        selected_uris: Optional[Set[str]] = None,
+    ) -> tuple[Optional[List[str]], Optional[Set[str]]]:
+        """Return native-relative paths after ACL and optional caller filtering."""
+        acl_filtered = await self._acl_enabled(ctx) and is_acl_uri(uri)
+        if not acl_filtered and selected_uris is None:
+            return None, None
+        vector_store = self._get_vector_store()
+        if acl_filtered and (vector_store is None or not hasattr(vector_store, "scroll_visible")):
+            raise RuntimeError("ACL-aware grep requires a visible vector index scan")
+
+        real_ctx = self._ctx_or_default(ctx)
+        root_path = self._uri_to_path(uri, ctx=real_ctx)
+        visible = set(selected_uris) if selected_uris is not None else set()
+        if acl_filtered:
+            visible.clear()
+            filter_expr = And([PathScope("uri", uri, depth=level_limit), Eq("level", 2)])
+            cursor: Optional[str] = None
+            while True:
+                records, cursor = await vector_store.scroll_visible(
+                    filter=filter_expr,
+                    limit=1000,
+                    cursor=cursor,
+                    output_fields=["uri"],
+                    ctx=real_ctx,
+                )
+                visible.update(str(record["uri"]) for record in records if record.get("uri"))
+                if cursor is None:
+                    break
+            if selected_uris is not None:
+                visible.intersection_update(selected_uris)
+
+        allowed: set[str] = set()
+        for record_uri in visible:
+            record_path = self._uri_to_path(record_uri, ctx=real_ctx)
+            relative = posixpath.relpath(record_path, root_path)
+            if relative != ".." and not relative.startswith("../"):
+                allowed.add(relative)
+        return sorted(allowed), visible
 
     async def _session_native_grep_safe(self, uri: str, ctx: Optional[RequestContext]) -> bool:
         """Return whether native grep sees every visible path for ``uri``.
@@ -582,6 +630,7 @@ class _GrepMixin:
         node_limit: Optional[int] = None,
         level_limit: int = 10,
         ctx: Optional[RequestContext] = None,
+        allowed_paths: Optional[List[str]] = None,
         before_context: int = 0,
         after_context: int = 0,
     ) -> Dict:
@@ -617,18 +666,21 @@ class _GrepMixin:
             excluded_path = self._uri_to_path(normalized_excluded_uri, ctx=ctx)
 
         try:
-            result = await self._async_agfs.grep(
-                path=path,
-                pattern=pattern,
-                recursive=True,
-                case_insensitive=case_insensitive,
-                stream=False,
-                node_limit=node_limit,
-                exclude_path=excluded_path,
-                level_limit=level_limit,
-                before_context=before_context,
-                after_context=after_context,
-            )
+            grep_kwargs = {
+                "path": path,
+                "pattern": pattern,
+                "recursive": True,
+                "case_insensitive": case_insensitive,
+                "stream": False,
+                "node_limit": node_limit,
+                "exclude_path": excluded_path,
+                "level_limit": level_limit,
+                "before_context": before_context,
+                "after_context": after_context,
+            }
+            if allowed_paths is not None:
+                grep_kwargs["allowed_paths"] = allowed_paths
+            result = await self._async_agfs.grep(**grep_kwargs)
         except (AttributeError, AGFSNotSupportedError, NotImplementedError):
             # Capability missing: let the outer caller fall back to the VikingFS implementation.
             logger.warning("agfs grep unavailable, falling back to VikingFS implementation")

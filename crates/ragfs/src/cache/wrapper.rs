@@ -4,8 +4,8 @@ use super::envelope::{CacheEnvelope, CacheObjectKind, GenerationSnapshot};
 use super::{CacheMetrics, CachePolicy, CacheTraversalMode};
 use crate::cache_runtime::{CacheError, CacheResult, CacheRuntime, SetOptions, SetResult};
 use crate::core::filesystem::{
-    apply_read_dir_options, compile_grep_regex, is_excluded_path, normalize_prefix_path,
-    paginate_entries, relative_depth, relative_match_file,
+    apply_read_dir_options, compile_grep_regex, is_allowed_grep_path, is_excluded_path,
+    normalize_prefix_path, paginate_entries, relative_depth, relative_match_file,
 };
 use crate::core::grep::GrepLineCollector;
 use crate::core::types::GrepContextLine;
@@ -290,6 +290,9 @@ impl CachedFileSystem {
                     }
                 }
 
+                if !is_allowed_grep_path(&base_path, &current_path, options.allowed_paths) {
+                    continue;
+                }
                 file_batch.push(current_path);
                 if file_batch.len() >= GREP_CACHE_FILE_CONCURRENCY {
                     self.flush_grep_file_batch(
@@ -341,6 +344,7 @@ impl CachedFileSystem {
             .map(|limit| limit.saturating_sub(result.count))
             .unwrap_or(usize::MAX);
         let files = std::mem::take(file_batch);
+        result.files_scanned += files.len();
         let mut indexed = stream::iter(files.into_iter().enumerate())
             .map(|(index, path)| async move {
                 let matches = self
@@ -395,6 +399,7 @@ impl CachedFileSystem {
         let mut result = GrepResult {
             matches: Vec::with_capacity(remaining_limit.min(64)),
             count: 0,
+            files_scanned: 0,
         };
         let mut collector = GrepLineCollector::new(
             rel_file.clone(),

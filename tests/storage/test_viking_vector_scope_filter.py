@@ -102,6 +102,25 @@ async def test_search_by_random_passes_runtime_acl_state_to_tenant_filter():
     assert adapter.search_by_random.await_args.kwargs["filter"] == _tenant_filter(ctx)
 
 
+@pytest.mark.asyncio
+async def test_scroll_visible_applies_runtime_acl_filter():
+    ctx = _ctx()
+    adapter = SimpleNamespace(scroll=AsyncMock(return_value=([{"uri": "visible"}], None)))
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = AclManager(backend, _AclConfigReader(True))
+    backend._get_backend_for_context = AsyncMock(return_value=adapter)
+    requested = PathScope("uri", "viking://resources/project", depth=10)
+
+    assert await backend.scroll_visible(filter=requested, output_fields=["uri"], ctx=ctx) == (
+        [{"uri": "visible"}],
+        None,
+    )
+    adapter.scroll.assert_awaited_once()
+    assert adapter.scroll.await_args.kwargs["filter"] == backend._merge_filters(
+        requested, backend._tenant_filter(ctx, acl_enabled=True)
+    )
+
+
 def test_descendant_target_elides_only_visible_root_path_filter():
     ctx = _ctx()
     target = "viking://resources/wiki/physics"

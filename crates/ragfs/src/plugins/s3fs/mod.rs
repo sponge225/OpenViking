@@ -29,7 +29,9 @@ use regex::Regex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::core::context::FsContextView;
-use crate::core::filesystem::{relative_depth, relative_match_file, sort_directory_entries};
+use crate::core::filesystem::{
+    is_allowed_grep_path, relative_depth, relative_match_file, sort_directory_entries,
+};
 use crate::core::glob::PreparedGlob;
 use crate::core::grep::GrepLineCollector;
 use crate::core::types::GrepContextLine;
@@ -122,6 +124,7 @@ async fn grep_stream(
     let mut result = GrepResult {
         matches: Vec::with_capacity(remaining_limit.min(64)),
         count: 0,
+        files_scanned: 0,
     };
     let mut collector = GrepLineCollector::new(
         rel_file.to_string(),
@@ -417,12 +420,14 @@ impl S3FileSystem {
         let limit = options.node_limit.unwrap_or(usize::MAX);
         let result = Arc::new(Mutex::new(GrepResult::new()));
         let matched_count = Arc::new(AtomicUsize::new(0));
+        let files_scanned = Arc::new(AtomicUsize::new(0));
         let buf_size = Self::default_grep_concurrency().min(files.len());
 
         let mut stream = stream::iter(files)
             .map(|(path, file_size)| {
                 let result = Arc::clone(&result);
                 let matched_count = Arc::clone(&matched_count);
+                let files_scanned = Arc::clone(&files_scanned);
                 async move {
                     let done = matched_count.load(Ordering::Acquire);
                     if done >= limit {
@@ -430,6 +435,7 @@ impl S3FileSystem {
                     }
 
                     let remaining = limit.saturating_sub(done);
+                    files_scanned.fetch_add(1, Ordering::Relaxed);
                     let matches = self
                         .grep_one_file(
                             base_path,
@@ -465,6 +471,8 @@ impl S3FileSystem {
             let mut guard = result.lock().unwrap();
             std::mem::take(&mut *guard)
         };
+        let mut final_result = final_result;
+        final_result.files_scanned = files_scanned.load(Ordering::Relaxed);
 
         Ok(final_result)
     }
@@ -958,6 +966,13 @@ impl FileSystem for S3FileSystem {
         .map_err(|e| Error::invalid_operation(format!("Invalid regex: {}", e)))?;
 
         if !info.is_dir {
+            let rel = relative_match_file(&normalized, &normalized);
+            if options
+                .allowed_paths
+                .is_some_and(|allowed| !allowed.contains(&rel))
+            {
+                return Ok(GrepResult::new());
+            }
             if let Some(ref excl) = normalized_exclude {
                 if s3_is_excluded_path(&normalized, excl) {
                     return Ok(GrepResult::new());
@@ -991,6 +1006,9 @@ impl FileSystem for S3FileSystem {
             }
 
             let fs_path = format!("/{}", self.client.strip_prefix(&obj.key));
+            if !is_allowed_grep_path(&normalized, &fs_path, options.allowed_paths) {
+                continue;
+            }
 
             if let Some(ref excl) = normalized_exclude {
                 if s3_is_excluded_path(&fs_path, excl) {

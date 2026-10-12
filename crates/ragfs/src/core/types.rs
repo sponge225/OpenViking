@@ -5,7 +5,7 @@
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
 /// Supported directory listing sort fields.
@@ -39,6 +39,8 @@ pub struct GrepOptions<'a> {
     pub node_limit: Option<usize>,
     /// Optional path prefix to exclude.
     pub exclude_path: Option<&'a str>,
+    /// Optional query-root-relative file allowlist, applied before file reads.
+    pub allowed_paths: Option<&'a HashSet<String>>,
     /// Optional maximum depth relative to the query root.
     pub level_limit: Option<usize>,
     /// Number of lines to include before each match.
@@ -54,6 +56,7 @@ impl Default for GrepOptions<'_> {
             case_insensitive: false,
             node_limit: None,
             exclude_path: None,
+            allowed_paths: None,
             level_limit: None,
             before_context: 0,
             after_context: 0,
@@ -142,6 +145,9 @@ pub struct GrepResult {
 
     /// Total number of matches
     pub count: usize,
+
+    /// Number of files whose contents were scanned.
+    pub files_scanned: usize,
 }
 
 /// Tree traversal entry.
@@ -204,13 +210,18 @@ impl GrepResult {
         Self {
             matches: Vec::new(),
             count: 0,
+            files_scanned: 0,
         }
     }
 
     /// Create a GrepResult from a list of matches
     pub fn from_matches(matches: Vec<GrepMatch>) -> Self {
         let count = matches.len();
-        Self { matches, count }
+        Self {
+            matches,
+            count,
+            files_scanned: 0,
+        }
     }
 
     /// Add a match to the result

@@ -1367,6 +1367,19 @@ def _restricted_acl() -> EffectiveAcl:
     return EffectiveAcl(AclMode.RESTRICTED, DirectAcl(), DirectAcl())
 
 
+class _VisibleUriStore:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    async def scroll_visible(self, **kwargs):
+        self.calls.append(kwargs)
+        index = int(kwargs.get("cursor") or 0)
+        records = self.pages[index]
+        next_cursor = str(index + 1) if index + 1 < len(self.pages) else None
+        return records, next_cursor
+
+
 @pytest.mark.asyncio
 async def test_grep_with_agfs_denies_acl_restricted_content_without_grant(monkeypatch):
     """Native grep must not leak restricted-inheritance content to a user with no grant."""
@@ -1404,3 +1417,83 @@ async def test_grep_with_agfs_allows_acl_granted_content(monkeypatch):
 
     assert [m["uri"] for m in result["matches"]] == ["viking://resources/secret.md"]
     assert result["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_acl_filters_files_before_grep_node_limit(monkeypatch):
+    denied = "viking://resources/project/alpha.txt"
+    allowed = "viking://resources/project/omega.txt"
+    vector_store = _VisibleUriStore([[{"uri": allowed}]])
+    viking_fs = VikingFS(agfs=_DummyAgfs(), vector_store=vector_store)
+    viking_fs.acl_manager = _RestrictedAclManager(
+        {
+            denied: _restricted_acl(),
+            allowed: EffectiveAcl(
+                AclMode.RESTRICTED,
+                DirectAcl.from_entries([AclEntry("user:mallory", AclLevel.READ)]),
+                DirectAcl(),
+            ),
+        }
+    )
+    ctx = RequestContext(user=UserIdentifier("acct1", "mallory"), role=Role.USER)
+    native_grep = AsyncMock(
+        return_value={
+            "matches": [{"file": "omega.txt", "line": 1, "content": "hit"}],
+            "files_scanned": 1,
+        }
+    )
+    monkeypatch.setattr(viking_fs._async_agfs, "grep", native_grep)
+    monkeypatch.setattr(
+        viking_fs,
+        "_uri_to_path",
+        lambda uri, ctx=None: uri.replace("viking://", "/", 1),
+    )
+    monkeypatch.setattr(
+        viking_fs,
+        "_path_to_uri",
+        lambda path, ctx=None: path.replace("/resources", "viking://resources", 1),
+    )
+    result = await viking_fs._grep_fs(
+        uri="viking://resources/project",
+        pattern="ACL_NODE_LIMIT_MARKER",
+        exclude_uri=None,
+        case_insensitive=False,
+        node_limit=1,
+        level_limit=10,
+        ctx=ctx,
+    )
+
+    assert [match["uri"] for match in result["matches"]] == [allowed]
+    assert native_grep.await_args.kwargs["allowed_paths"] == ["omega.txt"]
+    assert native_grep.await_args.kwargs["node_limit"] == 1
+    assert result["files_scanned"] == 1
+    assert vector_store.calls[0]["limit"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_acl_grep_finds_granted_file_below_denied_directory(monkeypatch):
+    allowed = "viking://resources/project/private/shared.txt"
+    vector_store = _VisibleUriStore(
+        [
+            [{"uri": allowed}],
+            [{"uri": "viking://resources/project/public.txt"}],
+        ]
+    )
+    viking_fs = VikingFS(agfs=_DummyAgfs(), vector_store=vector_store)
+    viking_fs.acl_manager = _RestrictedAclManager({})
+    ctx = RequestContext(user=UserIdentifier("acct1", "mallory"), role=Role.USER)
+    monkeypatch.setattr(
+        viking_fs,
+        "_uri_to_path",
+        lambda uri, ctx=None: uri.replace("viking://", "/", 1),
+    )
+
+    assert await viking_fs._grep_allowed_paths(
+        "viking://resources/project",
+        level_limit=10,
+        ctx=ctx,
+    ) == (
+        ["private/shared.txt", "public.txt"],
+        {allowed, "viking://resources/project/public.txt"},
+    )
+    assert [call["cursor"] for call in vector_store.calls] == [None, "1"]

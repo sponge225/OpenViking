@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use std::any::Any;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Component, Path};
 
 use super::errors::{Error, Result};
@@ -130,6 +131,18 @@ pub(crate) fn is_excluded_path(path: &str, exclude_path: &str) -> bool {
         || path
             .strip_prefix(exclude_path)
             .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+/// Return whether a file is in the optional query-root-relative grep allowlist.
+pub(crate) fn is_allowed_grep_path(
+    base_path: &str,
+    path: &str,
+    allowed_paths: Option<&HashSet<String>>,
+) -> bool {
+    allowed_paths.is_none_or(|allowed| {
+        let relative = relative_match_file(base_path, path);
+        allowed.contains(&relative)
+    })
 }
 
 /// Convert an absolute/plugin path to a query-root-relative grep match path.
@@ -552,7 +565,11 @@ pub trait FileSystem: Send + Sync + Any {
         {
             return Ok(());
         }
+        if !is_allowed_grep_path(base_path, path, options.allowed_paths) {
+            return Ok(());
+        }
 
+        result.files_scanned += 1;
         let content = self.read(path, 0, 0).await?;
 
         let content_str = String::from_utf8_lossy(&content);

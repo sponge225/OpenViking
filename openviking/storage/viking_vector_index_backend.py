@@ -1731,6 +1731,29 @@ class VikingVectorIndexBackend:
             output_fields=output_fields,
         )
 
+    async def scroll_visible(
+        self,
+        filter: Optional[Dict[str, Any] | FilterExpr] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+        output_fields: Optional[List[str]] = None,
+        *,
+        ctx: RequestContext,
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        """Return one page after applying tenant and ACL visibility filters."""
+        backend = await self._get_backend_for_context(ctx)
+        acl_enabled = await self._acl_enabled(ctx)
+        filter = self._merge_filters(
+            filter,
+            self._tenant_filter(ctx, acl_enabled=acl_enabled),
+        )
+        return await backend.scroll(
+            filter=filter,
+            limit=limit,
+            cursor=cursor,
+            output_fields=output_fields,
+        )
+
     async def _strict_transfer_page(
         self,
         ctx: RequestContext,

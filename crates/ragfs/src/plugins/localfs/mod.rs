@@ -449,6 +449,7 @@ impl LocalFileSystem {
 
         let mut out = GrepResult::new();
         let limit = options.node_limit.unwrap_or(usize::MAX);
+        let allowed_paths = options.allowed_paths;
         let exclude_rel = options
             .exclude_path
             .and_then(|p| Self::exclude_to_query_root_relative_path(base_path, &local_root, p));
@@ -457,6 +458,12 @@ impl LocalFileSystem {
         if local_root.is_file() {
             let file_virtual = Self::local_to_query_relative_path(&local_root, &local_root)
                 .ok_or_else(|| Error::InvalidPath(virtual_path.to_string()))?;
+            if allowed_paths
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&file_virtual))
+            {
+                return Ok(out);
+            }
             if exclude_rel
                 .as_deref()
                 .is_some_and(|exclude| Self::is_excluded_virtual(&file_virtual, exclude))
@@ -520,6 +527,12 @@ impl LocalFileSystem {
                 Some(p) => p,
                 None => continue,
             };
+            if allowed_paths
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&file_virtual))
+            {
+                continue;
+            }
 
             if let Some(excl_rel) = exclude_rel.as_deref() {
                 if Self::is_excluded_virtual(&file_virtual, excl_rel) {
@@ -556,6 +569,7 @@ impl LocalFileSystem {
         limit: usize,
         result: &mut GrepResult,
     ) {
+        result.files_scanned += 1;
         let sink = LocalGrepSink::new(
             file_virtual,
             options.before_context,
@@ -1159,6 +1173,7 @@ impl FileSystem for LocalFileSystem {
         let path_owned = path.to_string();
         let base_path = self.base_path.clone();
         let exclude_owned = options.exclude_path.map(str::to_string);
+        let allowed_owned = options.allowed_paths.cloned();
         let recursive = options.recursive;
         let case_insensitive = options.case_insensitive;
         let node_limit = options.node_limit;
@@ -1173,6 +1188,7 @@ impl FileSystem for LocalFileSystem {
                 case_insensitive,
                 node_limit,
                 exclude_path: exclude_owned.as_deref(),
+                allowed_paths: allowed_owned.as_ref(),
                 level_limit,
                 before_context,
                 after_context,
@@ -1675,6 +1691,76 @@ mod tests {
         assert_eq!(out.count, 1);
         assert_eq!(out.matches.len(), 1);
         assert_eq!(out.matches[0].file, "ok/y.txt");
+    }
+
+    #[tokio::test]
+    async fn test_localfs_grep_allowlist_applies_before_node_limit() {
+        let (dir, fs) = localfs();
+        write_file(dir.path(), "alpha.txt", "hit\n");
+        write_file(dir.path(), "omega.txt", "hit\n");
+        let allowed = std::collections::HashSet::from(["omega.txt".to_string()]);
+
+        let out = fs
+            .grep(
+                "/",
+                "hit",
+                GrepOptions {
+                    recursive: true,
+                    node_limit: Some(1),
+                    allowed_paths: Some(&allowed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.count, 1);
+        assert_eq!(out.matches[0].file, "omega.txt");
+        assert_eq!(out.files_scanned, 1);
+
+        let empty = std::collections::HashSet::new();
+        let denied = fs
+            .grep(
+                "/",
+                "hit",
+                GrepOptions {
+                    recursive: true,
+                    allowed_paths: Some(&empty),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.count, 0);
+        assert_eq!(denied.files_scanned, 0);
+    }
+
+    #[tokio::test]
+    async fn test_localfs_grep_handles_100k_path_allowlist() {
+        let (dir, fs) = localfs();
+        write_file(dir.path(), "allowed.txt", "hit\n");
+        write_file(dir.path(), "denied.txt", "hit\n");
+        let mut allowed = (0..100_000)
+            .map(|index| format!("bulk/{index:06}.txt"))
+            .collect::<std::collections::HashSet<_>>();
+        allowed.insert("allowed.txt".to_string());
+
+        let out = fs
+            .grep(
+                "/",
+                "hit",
+                GrepOptions {
+                    recursive: true,
+                    allowed_paths: Some(&allowed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.count, 1);
+        assert_eq!(out.matches[0].file, "allowed.txt");
+        assert_eq!(out.files_scanned, 1);
     }
 
     #[tokio::test]

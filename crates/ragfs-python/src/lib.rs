@@ -8,7 +8,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyType};
 use pyo3::wrap_pyfunction;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -1093,6 +1093,7 @@ fn grep_result_to_py_dict(py: Python<'_>, result: &GrepResult) -> PyResult<Py<Py
 
     dict.set_item("matches", matches_list)?;
     dict.set_item("count", result.count)?;
+    dict.set_item("files_scanned", result.files_scanned)?;
 
     Ok(dict.into())
 }
@@ -2260,6 +2261,7 @@ impl RAGFSBindingClient {
     ///     stream: Not supported in binding mode
     ///     node_limit: Maximum number of matches to return (default: None, no limit)
     ///     exclude_path: Optional path prefix to exclude from search (default: None)
+    ///     allowed_paths: Optional query-root-relative file allowlist (default: None)
     ///     level_limit: Optional maximum depth relative to query root (default: None)
     ///     ctx: Optional FsContext dict (e.g. {"account_id": ...})
     ///     before_context: Number of lines to include before each match (default: 0)
@@ -2267,7 +2269,7 @@ impl RAGFSBindingClient {
     ///
     /// Returns:
     ///     A dict with "matches" (list of match dicts) and "count" (total matches)
-    #[pyo3(signature = (path, pattern, recursive=false, case_insensitive=false, stream=false, node_limit=None, exclude_path=None, level_limit=None, ctx=None, before_context=0, after_context=0))]
+    #[pyo3(signature = (path, pattern, recursive=false, case_insensitive=false, stream=false, node_limit=None, exclude_path=None, allowed_paths=None, level_limit=None, ctx=None, before_context=0, after_context=0))]
     #[allow(clippy::too_many_arguments)]
     fn grep(
         &self,
@@ -2279,6 +2281,7 @@ impl RAGFSBindingClient {
         stream: bool,
         node_limit: Option<i32>,
         exclude_path: Option<String>,
+        allowed_paths: Option<Vec<String>>,
         level_limit: Option<i32>,
         ctx: Option<HashMap<String, String>>,
         before_context: i32,
@@ -2296,6 +2299,7 @@ impl RAGFSBindingClient {
         let level_limit_usize = level_limit.map(|n| if n < 0 { 0 } else { n as usize });
         let before_context = before_context.max(0) as usize;
         let after_context = after_context.max(0) as usize;
+        let allowed_paths = allowed_paths.map(|paths| paths.into_iter().collect::<HashSet<_>>());
 
         let result = self
             .run_scoped(py, fs_ctx, move || async move {
@@ -2307,6 +2311,7 @@ impl RAGFSBindingClient {
                         case_insensitive,
                         node_limit: limit,
                         exclude_path: exclude_path.as_deref(),
+                        allowed_paths: allowed_paths.as_ref(),
                         level_limit: level_limit_usize,
                         before_context,
                         after_context,

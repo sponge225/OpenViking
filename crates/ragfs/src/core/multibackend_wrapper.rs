@@ -1635,13 +1635,19 @@ impl FileSystem for MultiWriteWrappedFS {
                 {
                     continue;
                 }
+                let rel_path = relative_match_file(&path_owned, &entry.path);
+                if options
+                    .allowed_paths
+                    .is_some_and(|allowed| !allowed.contains(&rel_path))
+                {
+                    continue;
+                }
                 if is_excluded_grep_path(&entry.path, exclude_owned.as_deref()) {
                     continue;
                 }
                 let Some(read_backend) = inner.resolve_read_backend(&entry.path).await else {
                     continue;
                 };
-                let rel_path = relative_match_file(&path_owned, &entry.path);
                 let target_result = match read_backend
                     .grep(
                         &entry.path,
@@ -1650,6 +1656,7 @@ impl FileSystem for MultiWriteWrappedFS {
                             recursive: false,
                             node_limit: node_limit.map(|limit| limit.saturating_sub(result.count)),
                             exclude_path: None,
+                            allowed_paths: None,
                             level_limit: None,
                             ..options
                         },
@@ -1667,6 +1674,7 @@ impl FileSystem for MultiWriteWrappedFS {
                     result.matches.push(m);
                     result.count += 1;
                 }
+                result.files_scanned += target_result.files_scanned;
             }
             return Ok(result);
         }
@@ -1680,6 +1688,13 @@ impl FileSystem for MultiWriteWrappedFS {
                         } else {
                             format!("{}/{}", search_dir, name)
                         };
+                        let rel_path = relative_match_file(&path_owned, &redirect_path);
+                        if options
+                            .allowed_paths
+                            .is_some_and(|allowed| !allowed.contains(&rel_path))
+                        {
+                            continue;
+                        }
                         if let Ok(target_result) = be
                             .backend
                             .grep(
@@ -1688,13 +1703,13 @@ impl FileSystem for MultiWriteWrappedFS {
                                 GrepOptions {
                                     recursive: false,
                                     exclude_path: None,
+                                    allowed_paths: None,
                                     level_limit: None,
                                     ..options
                                 },
                             )
                             .await
                         {
-                            let rel_path = relative_match_file(&path_owned, &redirect_path);
                             for mut m in target_result.matches {
                                 if node_limit.is_some_and(|limit| result.count >= limit) {
                                     break;
@@ -1703,6 +1718,7 @@ impl FileSystem for MultiWriteWrappedFS {
                                 result.matches.push(m);
                                 result.count += 1;
                             }
+                            result.files_scanned += target_result.files_scanned;
                         }
                     }
                 }
