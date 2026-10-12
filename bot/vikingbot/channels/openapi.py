@@ -1022,6 +1022,18 @@ class OpenAPIChannel(BaseChannel):
             )
         health = await self._request_upstream_health(request)
         self._assert_runtime_health_mode(health)
+        if (
+            not configured_api_key
+            and not auth.can_trust_forwarded_connection
+            and health.get("root_api_key_required") is not True
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Trusted OpenViking identity requires a trusted local proxy "
+                    "or upstream-validated root API key"
+                ),
+            )
         resolved_account_id = str(health.get("account_id") or "").strip()
         resolved_user_id = str(health.get("user_id") or "").strip()
         role = str(health.get("role") or "").strip().lower()
