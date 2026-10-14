@@ -173,6 +173,7 @@ fn pathlock_err_to_py(err: PathLockError) -> PyErr {
             })
         }
         PathLockError::InvalidRequest(_) => PyValueError::new_err(err.to_string()),
+        PathLockError::InvalidPath(_) => new_py_err("AGFSInvalidPathError", err.to_string()),
         PathLockError::Io(_) | PathLockError::InvalidToken(_) | PathLockError::Internal(_) => {
             new_py_err("AGFSInternalError", err.to_string())
         }

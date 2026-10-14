@@ -4076,6 +4076,7 @@ dependencies = [
  "grep-searcher",
  "hkdf",
  "ignore",
+ "libc",
  "libloading",
  "lru",
  "mime_guess",
