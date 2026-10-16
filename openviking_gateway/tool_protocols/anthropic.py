@@ -13,6 +13,7 @@ from .common import (
     ToolLoopError,
     ToolProtocol,
     ToolRound,
+    append,
     call,
     strip_notices,
 )
@@ -157,11 +158,11 @@ class AnthropicProtocol(ToolProtocol):
             index, delta = value["index"], value["delta"]
             block = self.blocks[index]
             if "partial_json" in delta:
-                self.arguments[index] = self.arguments.get(index, "") + delta["partial_json"]
+                append(self.arguments, index, delta["partial_json"])
             else:
                 for key in ("text", "thinking", "signature"):
                     if key in delta:
-                        block[key] = block.get(key, "") + delta[key]
+                        append(block, key, delta[key])
                 if delta.get("type") == "citations_delta":
                     block.setdefault("citations", []).append(copy.deepcopy(delta["citation"]))
         elif kind == "content_block_stop":

@@ -12,7 +12,11 @@ from typing import Optional
 
 from fastapi import Request
 
-from openviking.core.identifiers import validate_account_id, validate_user_id
+from openviking.core.identifiers import (
+    validate_account_id,
+    validate_identifier_length,
+    validate_user_id,
+)
 from openviking.server.api_keys import APIKeyManager
 from openviking.server.api_keys.legacy import validate_file_account_id
 from openviking.server.auth.plugin import AuthPlugin
@@ -204,6 +208,7 @@ class TrustedAuthPlugin(AuthPlugin):
             root_key=config.root_api_key,
             viking_fs=service.viking_fs,
             api_key_hashing_enabled=config.api_key_hashing_enabled,
+            service_name=app.state.service_name,
             account_store_provider=config.account_store.provider,
             account_store_params=config.account_store.params,
             account_store_watch_enabled=config.api_key_watch_enabled,
@@ -232,6 +237,8 @@ class TrustedAuthPlugin(AuthPlugin):
                 return
             if await manager.get_user(account_id, user_id) is not None:
                 return
+        if length_error := validate_identifier_length(user_id, "user_id"):
+            raise InvalidArgumentError(length_error)
         if user_id in self._in_flight.get(account_id, set()):
             return
         if user_id in self._pending.get(account_id, set()):

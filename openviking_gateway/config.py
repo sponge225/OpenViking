@@ -5,7 +5,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -40,6 +40,7 @@ class GatewayConfig(BaseModel):
     removed_fields: ClassVar[frozenset[str]] = frozenset({"encryption_key_env"})
 
     public_url: str = ""
+    mcp_file_links: Literal["proxy", "direct"] = "proxy"
     storage_path: str = "~/.openviking/gateway"
     management_key: str = Field(default="", repr=False)
     min_server_version: str = "0.4.16"

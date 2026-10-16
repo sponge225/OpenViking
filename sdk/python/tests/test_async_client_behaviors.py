@@ -1122,7 +1122,6 @@ def test_sync_add_resource_accepts_and_forwards_declared_add_type():
         "to": "viking://resources/feishu",
         "parent": None,
         "wait": False,
-        "timeout": None,
         "options": {"add_type": "feishu"},
     }
 
@@ -1595,45 +1594,6 @@ async def test_ls_and_tree_preserve_query_options_and_pagination():
     assert "include_overview" not in fake_http.get.await_args_list[1].kwargs["params"]
     assert fake_http.get.await_args_list[1].kwargs["params"]["overview_limit"] == 4000
     assert fake_http.get.await_args_list[1].kwargs["params"]["directories_only"] is True
-
-
-@pytest.mark.asyncio
-async def test_rm_uses_delete_request_with_timeout_when_provided():
-    client = AsyncHTTPClient(url="http://localhost:1933")
-    fake_http = SimpleNamespace(request=AsyncMock(return_value=object()))
-    client._http = fake_http
-    client._handle_response = lambda _response: None
-
-    await client.rm("/resources/demo.md", recursive=True, wait=True, timeout=5.0)
-
-    fake_http.request.assert_awaited_once_with(
-        "DELETE",
-        "/api/v1/fs",
-        params={
-            "uri": "viking://resources/demo.md",
-            "recursive": True,
-            "wait": True,
-            "timeout": 5.0,
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_batch_write_http_timeout_outlives_server_wait_timeout():
-    client = AsyncHTTPClient(url="http://localhost:1933", timeout=180.0)
-    client._request = AsyncMock(return_value=object())
-    client._handle_response_data = lambda _response: {"result": {}}
-
-    await client.batch_write(
-        "viking://resources/wiki",
-        [],
-        wait=True,
-        timeout=300.0,
-    )
-
-    request_timeout = client._request.await_args.kwargs["timeout"]
-    assert request_timeout.read == 330.0
-    assert request_timeout.connect == 180.0
 
 
 @pytest.mark.asyncio

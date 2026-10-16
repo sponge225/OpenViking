@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { UseQueryOptions } from '@tanstack/react-query'
 
 import { useAppConnection } from '#/hooks/use-app-connection'
+import { useStudioService } from '#/hooks/use-studio-service'
 import { useManagementKey } from './management-key'
 
 import {
@@ -86,6 +87,7 @@ export function gatewayQueryKey(
  */
 function useGatewayConnection() {
   const { connection, isConnectionRoleLoading, serverMode } = useAppConnection()
+  const service = useStudioService()
   const { baseUrl, accountId, userId } = connection
   const apiKey = connection.adminApiKey || connection.apiKey
   const managementKey = useManagementKey(baseUrl)
@@ -115,9 +117,11 @@ function useGatewayConnection() {
      * the gateway doesn't support it.
      */
     allowed:
-      serverMode === 'dev' ||
-      serverMode === 'trusted' ||
-      Boolean(apiKey.trim()),
+      service.ready &&
+      service.provider === 'opensource' &&
+      (serverMode === 'dev' ||
+        serverMode === 'trusted' ||
+        Boolean(apiKey.trim())),
     /** Local development authenticates as default/default without a credential. */
     devMode: serverMode === 'dev',
     isRoleLoading: isConnectionRoleLoading,
@@ -144,7 +148,11 @@ function useGatewayQuery<T>(
   return useQuery<T, GatewayError>({
     ...options,
     queryKey: gatewayQueryKey(scope, resource, ...params),
-    queryFn: () => load(connection),
+    queryFn: () => {
+      if (!allowed)
+        throw new Error('Gateway is unavailable for this connection')
+      return load(connection)
+    },
     enabled: allowed && options.enabled !== false,
   })
 }

@@ -255,6 +255,27 @@ def create_app(config: GatewayConfig, *, openviking_url: str, vlm_source=None, e
         except (aiohttp.ClientError, asyncio.TimeoutError):
             raise HTTPException(502, "OpenViking upload is unavailable")
 
+    @app.get("/downloads")
+    async def proxy_download(request: Request):
+        token = request.query_params.get("token", "")
+        if not token or len(token) > 16384:
+            raise HTTPException(400, "A signed download token is required")
+        try:
+            async with app.state.http.get(
+                openviking_url + "/api/v1/content/download",
+                params={"token": token},
+                headers={"accept-encoding": "identity"},
+                timeout=aiohttp.ClientTimeout(total=120),
+                allow_redirects=False,
+            ) as response:
+                return Response(
+                    await response.read(),
+                    status_code=response.status,
+                    headers=filtered_headers(response.headers),
+                )
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            raise HTTPException(502, "OpenViking download is unavailable")
+
     @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     @app.api_route("/api/v3/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     @app.api_route(

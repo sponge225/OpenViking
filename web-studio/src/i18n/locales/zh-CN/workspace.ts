@@ -12,9 +12,11 @@ const workspace = {
       users: '用户与权限',
     },
     header: {
+      backToConfig: '返回工作区配置',
+      chooseWorkspace: '重新选择工作区',
       currentUser: {
-        account: '账号',
-        accountSummary: '账号 · {{account}}',
+        account: '空间',
+        accountSummary: '空间 · {{account}}',
         keyUnavailable: '用户凭证不可用',
         loadingUsers: '正在加载用户',
         loadUsersFailed: '用户列表加载失败',
@@ -92,6 +94,7 @@ const workspace = {
     loading: '正在加载监控数据...',
     loadFailed: '监控数据加载失败',
     health: {
+      unknown: '暂无数据',
       healthy: '正常',
       unhealthy: '异常',
     },
@@ -342,6 +345,34 @@ const workspace = {
   skillsPage: {
     title: '技能',
     description: '查看当前用户和当前空间可用的 Agent 技能。',
+    add: {
+      title: '添加 Skill',
+      description:
+        '导入 SKILL.md 供 Agent 检索和读取。是否执行由使用它的 Agent 决定。',
+      scope: '添加到',
+      scopeDescription: {
+        user: '仅当前用户可用',
+        agent: '与当前账号共享，需有相应权限',
+      },
+      content: 'SKILL.md 内容',
+      placeholder:
+        '---\nname: my-skill\ndescription: 说明这个 Skill 的用途\n---\n\n# My skill',
+      contentHint:
+        '粘贴完整内容，或选择本地 SKILL.md 文件。此处只导入单个文件。',
+      upload: '选择 SKILL.md',
+      removeFile: '移除文件 {{fileName}}',
+      warnings: '校验提示',
+      failed: '添加失败',
+      processingFailed: '后台处理失败',
+      processing: '已提交，正在后台处理',
+      completed: 'Skill 已添加并处理完成',
+      taskId: '任务 ID',
+      close: '关闭',
+      another: '继续添加',
+      validating: '正在校验…',
+      adding: '正在提交…',
+      submit: '添加 Skill',
+    },
     refresh: '刷新',
     loading: '正在加载技能...',
     empty: '暂无可用技能',
@@ -627,6 +658,20 @@ const workspace = {
   },
   accountSwitcher: {
     create: '新建账号',
+    connections: {
+      add: '添加连接',
+      savedOnly: '显示连接设置中已保存的连接',
+      switch: '切换连接',
+      title: '已保存的连接',
+    },
+    serverAccountsTitle: '服务端账号',
+    provider: {
+      hosted: '火山托管',
+      opensource: '开源服务',
+    },
+    hosted: {
+      currentWorkspace: '当前空间',
+    },
     dialog: {
       accountLabel: '账号',
       accountPlaceholder: 'team-account',

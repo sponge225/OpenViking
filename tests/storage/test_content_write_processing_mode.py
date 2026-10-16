@@ -8,6 +8,9 @@ import pytest
 
 from openviking.core.context import ContextLevel
 from openviking.server.identity import RequestContext, Role
+from openviking.service.task_store import PersistentTaskStore
+from openviking.service.task_tracker import TaskTracker
+from openviking.service.task_work_index import bind_task_context
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.storage import content_write as content_write_module
 from openviking.storage.abstract_overview import (
@@ -15,12 +18,30 @@ from openviking.storage.abstract_overview import (
 )
 from openviking.storage.content_write import ContentWriteCoordinator
 from openviking.storage.context_update_plan import ContextUpdatePlan, FileRefreshIntent
+from openviking.storage.queuefs.queue_middleware import EnqueueReceipt
 from openviking.storage.queuefs.semantic_ops.freshness_policy import FreshnessAction
 from openviking.telemetry.context import bind_telemetry
 from openviking.telemetry.operation import OperationTelemetry
 from openviking.utils.ingest_options import IngestOptions
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
+from tests.test_task_tracker import _FakeAgfs
+
+
+@pytest.fixture(autouse=True)
+def run_content_write_operations_inline(monkeypatch):
+    tracker = TaskTracker(PersistentTaskStore(_FakeAgfs()))
+    monkeypatch.setattr("openviking.service.task_tracker._instance", tracker)
+
+    async def run_tracked_operation(_task_type, *, operation, **_kwargs):
+        with bind_task_context("test-task", "account-1", "user-1", enqueued_work=[]):
+            return await operation(), "test-task"
+
+    monkeypatch.setattr(
+        content_write_module,
+        "run_tracked_operation",
+        run_tracked_operation,
+    )
 
 
 class _FakePathLock:
@@ -239,7 +260,6 @@ async def test_direct_write_reads_target_once_after_lock_and_reuses_formal_state
         response_mode="replace",
         context_type="resource",
         wait=False,
-        timeout=None,
         ctx=ctx,
         telemetry_id="",
         ingest_options=IngestOptions(),
@@ -284,12 +304,15 @@ async def test_direct_write_hands_exact_lock_to_request_coordinator(monkeypatch,
             )
         ),
     )
-    queue = SimpleNamespace(enqueue=AsyncMock(return_value="queued"))
+    queue = SimpleNamespace(enqueue=AsyncMock(return_value=EnqueueReceipt("queued", "work-1")))
     manager = SimpleNamespace(SEMANTIC="semantic", get_queue=lambda *args, **kwargs: queue)
     monkeypatch.setattr(content_write_module, "get_queue_manager", lambda: manager)
     telemetry = OperationTelemetry(operation="content.write", enabled=False)
 
-    with bind_telemetry(telemetry):
+    with (
+        bind_telemetry(telemetry),
+        bind_task_context("test-task", "account-1", "user-1", enqueued_work=[]),
+    ):
         result = await coordinator._write_direct_with_refresh(
             uri=uri,
             root_uri="viking://resources",
@@ -298,7 +321,6 @@ async def test_direct_write_hands_exact_lock_to_request_coordinator(monkeypatch,
             response_mode="replace",
             context_type="resource",
             wait=False,
-            timeout=None,
             ctx=ctx,
             telemetry_id=telemetry.telemetry_id,
             ingest_options=IngestOptions(),
@@ -313,12 +335,6 @@ async def test_direct_write_hands_exact_lock_to_request_coordinator(monkeypatch,
     assert fake_fs._async_agfs.handoff_calls == ["lock-1"]
     assert result["semantic_status"] == "queued"
     assert result["vector_status"] == "queued"
-
-    content_write_module.get_request_wait_tracker().mark_semantic_done(
-        telemetry.telemetry_id,
-        coordinator_msg.id,
-        processed_delta=0,
-    )
 
 
 @pytest.mark.asyncio
@@ -351,7 +367,6 @@ async def test_direct_write_commits_final_bytes_when_rnfv_content_is_unchanged(m
         response_mode="replace",
         context_type="resource",
         wait=False,
-        timeout=None,
         ctx=ctx,
         telemetry_id="",
         ingest_options=IngestOptions(),
@@ -444,7 +459,6 @@ async def test_missing_append_starts_from_empty_content(monkeypatch, ctx):
         response_mode="append",
         context_type="resource",
         wait=False,
-        timeout=None,
         ctx=ctx,
         telemetry_id="",
         ingest_options=IngestOptions(),

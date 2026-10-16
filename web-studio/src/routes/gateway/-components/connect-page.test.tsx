@@ -46,6 +46,10 @@ const api = vi.hoisted(() => ({
 
 const host = vi.hoisted(() => ({ isGatewayHost: false }))
 
+vi.mock('#/hooks/use-studio-service', () => ({
+  useStudioService: () => ({ ready: true, provider: 'opensource' }),
+}))
+
 vi.mock('#/hooks/use-app-connection', () => ({
   useAppConnection: () => ({
     isGatewayHost: host.isGatewayHost,
@@ -79,7 +83,9 @@ function upstream(overrides: Partial<Upstream>): Upstream {
     name: 'Upstream',
     protocol: 'chat',
     base_url: 'https://api.example.com/v1',
+    append_endpoint_path: true,
     auth_mode: 'managed',
+    key_header: 'authorization',
     models: [],
     aliases: {},
     priority: 0,

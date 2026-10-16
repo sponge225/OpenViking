@@ -280,3 +280,17 @@ def test_public_url_normalization():
     assert ipv6.openviking_url == "http://[::1]:1933"
     with pytest.raises(ValidationError):
         StandaloneGatewayConfig(openviking_url="http://localhost:99999")
+
+
+def test_mcp_file_links_default_environment_and_validation(monkeypatch):
+    assert GatewayConfig().mcp_file_links == "proxy"
+    assert EmbeddedGatewayConfig(mcp_file_links="direct").mcp_file_links == "direct"
+    monkeypatch.setenv("OPENVIKING_GATEWAY_MCP_FILE_LINKS", "direct")
+    config = StandaloneGatewayConfig(openviking_url="http://openviking:1933")
+    assert config.mcp_file_links == "direct"
+    monkeypatch.setenv("OPENVIKING_GATEWAY_MCP_FILE_LINKS", "public")
+    with pytest.raises(ValidationError):
+        GatewayConfig()
+    monkeypatch.delenv("OPENVIKING_GATEWAY_MCP_FILE_LINKS")
+    with pytest.raises(ValidationError):
+        GatewayConfig(mcp_file_links="public")

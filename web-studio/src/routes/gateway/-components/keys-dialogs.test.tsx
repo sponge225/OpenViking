@@ -44,6 +44,10 @@ vi.mock('react-i18next', () => ({
     i18n: { resolvedLanguage: 'en' },
   }),
 }))
+vi.mock('#/hooks/use-studio-service', () => ({
+  useStudioService: () => ({ ready: true, provider: 'opensource' }),
+}))
+
 vi.mock('#/hooks/use-app-connection', () => ({
   useAppConnection: () => ({
     connection: {
@@ -239,7 +243,10 @@ describe('snippetModel', () => {
   })
 })
 
-function renderIssueDialog(upstreams: Upstream[] = [deepseek]) {
+function renderIssueDialog(
+  upstreams: Upstream[] = [deepseek],
+  defaults?: React.ComponentProps<typeof KeysIssueDialog>['defaults'],
+) {
   const onIssued = vi.fn()
   const onOpenChange = vi.fn()
   const client = new QueryClient({
@@ -253,6 +260,7 @@ function renderIssueDialog(upstreams: Upstream[] = [deepseek]) {
         profiles={[profile]}
         upstreams={upstreams}
         onIssued={onIssued}
+        defaults={defaults}
       />
     </QueryClientProvider>,
   )
@@ -617,6 +625,25 @@ describe('KeysIssueDialog', () => {
       upstream_ids: ['u2'],
       models: ['gpt-5'],
     })
+  })
+
+  it('starts from the given defaults', async () => {
+    api.issueKey.mockResolvedValue({})
+    renderIssueDialog([deepseek, openai], {
+      name: 'Quick mode',
+      policy_id: 'p1',
+      upstream_ids: ['u2'],
+    })
+    await waitFor(() => expect(userPicker().textContent).toContain('alice'))
+    submit()
+
+    await waitFor(() =>
+      expect(api.issueKey).toHaveBeenCalledWith(expect.anything(), {
+        ...request,
+        name: 'Quick mode',
+        upstream_ids: ['u2'],
+      }),
+    )
   })
 
   it('explains a rejected OpenViking key next to that field', async () => {

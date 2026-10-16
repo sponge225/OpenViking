@@ -97,7 +97,7 @@ class TestFsCp:
 
             # Request-scoped write completion can precede ancestor refreshes.
             # Copy needs a lease on the whole source tree, so settle those first.
-            settled = api_client.system_wait(timeout=30)
+            settled = api_client.system_wait()
             assert settled.status_code == 200, settled.text
 
             copied = api_client.fs_cp(source, target, recursive=True)
@@ -153,10 +153,6 @@ class TestFsCp:
         child_content = f"directory child remains {suffix}"
         try:
             assert api_client.fs_mkdir(directory_uri).status_code == 200
-            # mkdir queues a parent refresh; finish it before preparing files so
-            # this test exercises type validation, not a transient refresh lock.
-            settled = api_client.system_wait(timeout=30)
-            assert settled.status_code == 200, settled.text
             for uri, content in ((file_uri, file_content), (child_uri, child_content)):
                 write = api_client.fs_write(uri, content, mode="create", wait=True)
                 assert write.status_code == 200, write.text

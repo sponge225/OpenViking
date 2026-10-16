@@ -1,5 +1,5 @@
+import { fetchServerHealth } from '#/lib/connection/health'
 import * as React from 'react'
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import {
   CircleAlertIcon,
@@ -14,7 +14,6 @@ import { useTranslation } from 'react-i18next'
 
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
 import { Button } from '#/components/ui/button'
-import { fetchServerHealth } from '#/hooks/use-server-mode'
 import { Badge } from '#/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card'
 import {
@@ -24,15 +23,27 @@ import {
   FieldLabel,
 } from '#/components/ui/field'
 import { Input } from '#/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '#/components/ui/select'
+import { canEditStudioConfiguration } from '#/lib/studio-permissions'
+import { resolveConfiguredServiceProvider } from '#/lib/studio-service'
+import { isValidConnectionUrl } from '#/lib/connection/profiles'
+import { CLOUD_SETUP_URL } from '#/lib/connection/onboarding'
+import { useStudioService } from '#/hooks/use-studio-service'
 import { useAppConnection } from '#/hooks/use-app-connection'
-import { probeStudioConnection } from '#/lib/admin'
+import { useConnectionProbe } from '#/hooks/use-connection-probe'
 import type { CapabilityProbeResult } from '#/lib/admin'
-import { DEFAULT_ACCOUNT_ID, DEFAULT_USER_ID } from '#/lib/admin-options'
 import { PLAIN_INPUT_PROPS } from '#/lib/form-input'
 import { cn } from '#/lib/utils'
 import { localizeCapabilityDetail } from './-lib/localize-capability-probe'
 import type { ConnectionDraft } from '#/hooks/use-app-connection'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '#/components/ui/tabs'
+import { ConnectionProfilesList } from './-components/connection-profiles'
 import { ServerConfigurationEditor } from './-components/server-configuration'
 
 export const Route = createFileRoute('/settings')({
@@ -41,24 +52,57 @@ export const Route = createFileRoute('/settings')({
 
 function ConnectionSettingsRoute() {
   const { t } = useTranslation('settings')
-  const { identityScopeKey, isGatewayHost } = useAppConnection()
+  const {
+    identityScopeKey,
+    isGatewayHost,
+    activeProfileId,
+    connection,
+    connectionRole,
+    isConnectionRoleLoading,
+    serverMode,
+  } = useAppConnection()
+  const service = useStudioService()
+  const canConfigure =
+    service.ready &&
+    canEditStudioConfiguration({
+      serviceProvider: service.provider,
+      hasControlCredential: Boolean(connection.adminApiKey.trim()),
+      isRoleLoading: isConnectionRoleLoading,
+      role: connectionRole,
+      serverMode,
+    })
+  const [activeTab, setActiveTab] = React.useState('connection')
+  React.useEffect(() => {
+    setActiveTab('connection')
+  }, [identityScopeKey, canConfigure])
   if (isGatewayHost) return <GatewayConnectionSettings />
   return (
     <div className="flex w-full min-w-0 flex-col gap-5">
       <h1 className="text-2xl font-semibold">{t('pageTitle')}</h1>
-      <Tabs defaultValue="connection" className="min-w-0 gap-5">
+      <Tabs
+        value={canConfigure ? activeTab : 'connection'}
+        onValueChange={setActiveTab}
+        className="min-w-0 gap-5"
+      >
         <TabsList variant="line">
           <TabsTrigger value="connection">{t('tabs.connection')}</TabsTrigger>
-          <TabsTrigger value="configuration">
-            {t('tabs.configuration')}
-          </TabsTrigger>
+          {canConfigure ? (
+            <TabsTrigger value="configuration">
+              {t('tabs.configuration')}
+            </TabsTrigger>
+          ) : null}
         </TabsList>
         <TabsContent value="connection">
-          <ConnectionSettingsPanel />
+          <div className="grid gap-5">
+            <ConnectionProfilesList />
+            <ConnectionSettingsPanel key={activeProfileId} />
+          </div>
         </TabsContent>
-        <TabsContent value="configuration" keepMounted>
-          <ServerConfigurationEditor key={identityScopeKey} />
-        </TabsContent>
+        {canConfigure ? (
+          <TabsContent value="configuration" keepMounted>
+            <ServerConfigurationEditor key={identityScopeKey} />
+          </TabsContent>
+        ) : null}
       </Tabs>
     </div>
   )
@@ -241,22 +285,18 @@ function CapabilityStatus({
 }
 
 function UserApiKeyInput({
-  accountId,
+  identity,
   id,
   onChange,
   placeholder,
-  userId,
   value,
 }: {
-  accountId: string
+  identity: string
   id: string
   onChange: (value: string) => void
   placeholder: string
-  userId: string
   value: string
 }) {
-  const identity = `${accountId || DEFAULT_ACCOUNT_ID}/${userId || DEFAULT_USER_ID}`
-
   return (
     <div className="flex h-9 w-full min-w-0 items-center gap-2 rounded-md border border-input bg-transparent bg-clip-padding px-2.5 shadow-xs transition-[color,box-shadow] focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
       <span className="shrink-0 rounded-sm bg-muted px-2 py-1 font-mono text-xs text-muted-foreground">
@@ -276,79 +316,103 @@ function UserApiKeyInput({
 }
 
 function ConnectionSettingsPanel() {
-  const { i18n, t } = useTranslation('settings')
-  const { connection, saveConnection, serverMode } = useAppConnection()
+  const { i18n, t } = useTranslation(['settings', 'studio'])
+  const service = useStudioService()
+  const { connection, reconnect, saveConnection, serverMode, serverHealth } =
+    useAppConnection()
   const [draft, setDraft] = React.useState<ConnectionDraft>(connection)
-  const pendingDraftRef = React.useRef<ConnectionDraft | null>(null)
-  const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
-  const saveConnectionRef = React.useRef(saveConnection)
-
+  const previousConnectionRef = React.useRef({ ...connection })
+  const openSourceUrlRef = React.useRef(
+    resolveConfiguredServiceProvider(
+      connection.baseUrl,
+      connection.serviceSelection,
+    ) === 'opensource'
+      ? connection.baseUrl
+      : '',
+  )
+  const [saveError, setSaveError] = React.useState(false)
+  const canEditControlCredential =
+    resolveConfiguredServiceProvider(draft.baseUrl, draft.serviceSelection) ===
+    'opensource'
   React.useEffect(() => {
-    saveConnectionRef.current = saveConnection
-  }, [saveConnection])
-
-  React.useEffect(() => {
-    if (!pendingDraftRef.current) {
+    const previous = previousConnectionRef.current
+    previousConnectionRef.current = { ...connection }
+    if (
+      previous.baseUrl !== connection.baseUrl ||
+      previous.serviceSelection !== connection.serviceSelection ||
+      previous.apiKey !== connection.apiKey ||
+      previous.adminApiKey !== connection.adminApiKey
+    ) {
+      if (
+        resolveConfiguredServiceProvider(
+          connection.baseUrl,
+          connection.serviceSelection,
+        ) === 'opensource'
+      ) {
+        openSourceUrlRef.current = connection.baseUrl
+      }
       setDraft(connection)
+      setSaveError(false)
+    } else if (
+      previous.accountId !== connection.accountId ||
+      previous.userId !== connection.userId
+    ) {
+      // Health may fill in identity while the user edits a recovery address/key.
+      // Update untouched identity fields without replacing the in-progress form.
+      setDraft((current) => ({
+        ...current,
+        accountId:
+          current.accountId === previous.accountId
+            ? connection.accountId
+            : current.accountId,
+        userId:
+          current.userId === previous.userId
+            ? connection.userId
+            : current.userId,
+      }))
     }
   }, [connection])
 
-  React.useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current)
-      }
-      if (pendingDraftRef.current) {
-        saveConnectionRef.current(pendingDraftRef.current)
-      }
-    }
-  }, [])
-
   function updateDraft(next: Partial<ConnectionDraft>): void {
-    const updated = { ...draft, ...next }
-    setDraft(updated)
-    pendingDraftRef.current = updated
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current)
-    }
-    saveTimerRef.current = setTimeout(() => {
-      saveTimerRef.current = null
-      const pending = pendingDraftRef.current
-      pendingDraftRef.current = null
-      if (pending) {
-        saveConnectionRef.current(pending)
-      }
-    }, 350)
+    setSaveError(false)
+    setDraft((current) => ({ ...current, ...next }))
   }
 
-  const probeQuery = useQuery({
-    enabled: Boolean(connection.baseUrl) && serverMode !== 'checking',
-    placeholderData: keepPreviousData,
-    queryFn: () =>
-      probeStudioConnection({
-        accountId: connection.accountId || DEFAULT_ACCOUNT_ID,
-        adminApiKey: connection.adminApiKey,
-        apiKey: connection.apiKey,
-        baseUrl: connection.baseUrl,
-        serverMode,
-        userId: connection.userId || DEFAULT_USER_ID,
-      }),
-    queryKey: [
-      'studio-connection-probe',
-      connection.baseUrl,
-      connection.adminApiKey,
-      connection.apiKey,
-      connection.accountId,
-      connection.userId,
-      serverMode,
-    ],
-    retry: false,
-    staleTime: 15_000,
-  })
+  function selectServiceType(selection: 'opensource' | 'volcengine'): void {
+    if (
+      resolveConfiguredServiceProvider(
+        draft.baseUrl,
+        draft.serviceSelection,
+      ) === 'opensource' &&
+      selection === 'volcengine'
+    ) {
+      openSourceUrlRef.current = draft.baseUrl
+    }
+    updateDraft({
+      serviceSelection: selection,
+      baseUrl:
+        selection === 'volcengine' ? CLOUD_SETUP_URL : openSourceUrlRef.current,
+    })
+  }
+
+  const resolvedIdentity =
+    draft.baseUrl === connection.baseUrl &&
+    draft.apiKey === connection.apiKey &&
+    draft.serviceSelection === connection.serviceSelection &&
+    (draft.apiKey || draft.adminApiKey === connection.adminApiKey) &&
+    typeof serverHealth?.account_id === 'string' &&
+    serverHealth.account_id &&
+    typeof serverHealth.user_id === 'string' &&
+    serverHealth.user_id
+      ? `${serverHealth.account_id}/${serverHealth.user_id}`
+      : t('studio:profiles.identityPending')
+
+  const probeQuery = useConnectionProbe()
   const isDevMode = serverMode === 'dev'
   const isUnsupportedAuthMode = serverMode === 'oidc' || serverMode === 'ldap'
   const rootApiKey = connection.adminApiKey.trim()
-  const hasControlCredential = Boolean(draft.adminApiKey.trim())
+  const hasControlCredential =
+    service.provider === 'opensource' && Boolean(draft.adminApiKey.trim())
   const hasDataCredential = Boolean(draft.apiKey.trim())
   const adminProbe = probeQuery.data?.admin
   const dataProbe = probeQuery.data?.data
@@ -359,33 +423,35 @@ function ConnectionSettingsPanel() {
   const trustedCredentialRequired =
     serverMode === 'trusted' && !probeQuery.isFetching && !hasControlCredential
   const keyGuide =
-    serverMode === 'trusted'
-      ? trustedCredentialRequired
-        ? {
-            primary: t('connection.keyGuide.trusted.primary'),
-            secondary: t('connection.keyGuide.trusted.secondary'),
-            title: t('connection.keyGuide.trusted.title'),
-          }
-        : null
-      : !hasControlCredential && !hasDataCredential
-        ? {
-            primary: t('connection.keyGuide.empty.primary'),
-            secondary: t('connection.keyGuide.empty.secondary'),
-            title: t('connection.keyGuide.empty.title'),
-          }
-        : !hasControlCredential
+    service.provider !== 'opensource'
+      ? null
+      : serverMode === 'trusted'
+        ? trustedCredentialRequired
           ? {
-              primary: t('connection.keyGuide.control.primary'),
-              secondary: t('connection.keyGuide.control.secondary'),
-              title: t('connection.keyGuide.control.title'),
+              primary: t('connection.keyGuide.trusted.primary'),
+              secondary: t('connection.keyGuide.trusted.secondary'),
+              title: t('connection.keyGuide.trusted.title'),
             }
-          : !hasDataCredential
+          : null
+        : !hasControlCredential && !hasDataCredential
+          ? {
+              primary: t('connection.keyGuide.empty.primary'),
+              secondary: t('connection.keyGuide.empty.secondary'),
+              title: t('connection.keyGuide.empty.title'),
+            }
+          : !hasControlCredential
             ? {
-                primary: t('connection.keyGuide.data.primary'),
-                secondary: t('connection.keyGuide.data.secondary'),
-                title: t('connection.keyGuide.data.title'),
+                primary: t('connection.keyGuide.control.primary'),
+                secondary: t('connection.keyGuide.control.secondary'),
+                title: t('connection.keyGuide.control.title'),
               }
-            : null
+            : !hasDataCredential
+              ? {
+                  primary: t('connection.keyGuide.data.primary'),
+                  secondary: t('connection.keyGuide.data.secondary'),
+                  title: t('connection.keyGuide.data.title'),
+                }
+              : null
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-5">
@@ -405,6 +471,61 @@ function ConnectionSettingsPanel() {
         </CardHeader>
         <CardContent className="grid gap-4 px-5 py-4">
           <Field>
+            <FieldLabel htmlFor="settings-service-type">
+              {t('studio:serviceType')}
+            </FieldLabel>
+            <FieldContent>
+              <Select
+                value={
+                  draft.serviceSelection === 'auto'
+                    ? resolveConfiguredServiceProvider(draft.baseUrl)
+                    : draft.serviceSelection
+                }
+                onValueChange={(value) =>
+                  selectServiceType(value as 'opensource' | 'volcengine')
+                }
+              >
+                <SelectTrigger
+                  id="settings-service-type"
+                  className="w-full bg-background"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent
+                  align="start"
+                  className="w-[var(--anchor-width)]"
+                >
+                  <SelectItem value="opensource">
+                    {t('studio:providers.opensource')}
+                  </SelectItem>
+                  <SelectItem value="volcengine">
+                    {t('studio:providers.volcengine')}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                {t('studio:profiles.typeHint')}
+              </FieldDescription>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={service.isChecking}
+                onClick={reconnect}
+              >
+                {t('studio:retry')}
+              </Button>
+              <p className="text-sm" aria-live="polite">
+                {t(
+                  `studio:providers.${service.isChecking ? 'checking' : service.provider}`,
+                )}{' '}
+                {service.version}
+              </p>
+              <FieldDescription>
+                {t(`studio:connectionSummary.${service.provider}`)}
+              </FieldDescription>
+            </FieldContent>
+          </Field>
+          <Field>
             <FieldLabel htmlFor="settings-base-url">
               {t('fields.baseUrl')}
             </FieldLabel>
@@ -414,6 +535,12 @@ function ConnectionSettingsPanel() {
                 value={draft.baseUrl}
                 onChange={(event) =>
                   updateDraft({ baseUrl: event.target.value })
+                }
+                readOnly={
+                  resolveConfiguredServiceProvider(
+                    draft.baseUrl,
+                    draft.serviceSelection,
+                  ) === 'volcengine'
                 }
                 placeholder={t('placeholders.baseUrl')}
                 inputMode="url"
@@ -458,39 +585,40 @@ function ConnectionSettingsPanel() {
           ) : (
             <>
               <div className="grid gap-4 md:grid-cols-2">
-                <Field>
-                  <FieldLabel htmlFor="settings-root-api-key">
-                    {t('fields.rootApiKey')}
-                  </FieldLabel>
-                  <FieldContent>
-                    <Input
-                      id="settings-root-api-key"
-                      type="password"
-                      value={draft.adminApiKey}
-                      onChange={(event) =>
-                        updateDraft({ adminApiKey: event.target.value })
-                      }
-                      placeholder={t('placeholders.adminApiKey')}
-                      {...PLAIN_INPUT_PROPS}
-                    />
-                    <FieldDescription>
-                      {t(
-                        serverMode === 'trusted'
-                          ? 'connection.trustedRootHint'
-                          : 'connection.rootHint',
-                      )}
-                    </FieldDescription>
-                  </FieldContent>
-                </Field>
+                {canEditControlCredential ? (
+                  <Field>
+                    <FieldLabel htmlFor="settings-root-api-key">
+                      {t('fields.rootApiKey')}
+                    </FieldLabel>
+                    <FieldContent>
+                      <Input
+                        id="settings-root-api-key"
+                        type="password"
+                        value={draft.adminApiKey}
+                        onChange={(event) =>
+                          updateDraft({ adminApiKey: event.target.value })
+                        }
+                        placeholder={t('placeholders.adminApiKey')}
+                        {...PLAIN_INPUT_PROPS}
+                      />
+                      <FieldDescription>
+                        {t(
+                          serverMode === 'trusted'
+                            ? 'connection.trustedRootHint'
+                            : 'connection.rootHint',
+                        )}
+                      </FieldDescription>
+                    </FieldContent>
+                  </Field>
+                ) : null}
                 <Field>
                   <FieldLabel htmlFor="settings-user-api-key">
                     {t('fields.userApiKey')}
                   </FieldLabel>
                   <FieldContent>
                     <UserApiKeyInput
-                      accountId={draft.accountId}
+                      identity={resolvedIdentity}
                       id="settings-user-api-key"
-                      userId={draft.userId}
                       value={draft.apiKey}
                       onChange={(apiKey) => updateDraft({ apiKey })}
                       placeholder={t('placeholders.userApiKey')}
@@ -507,11 +635,13 @@ function ConnectionSettingsPanel() {
               </div>
 
               <div className="grid gap-2 md:grid-cols-2">
-                <CapabilityStatus
-                  isLoading={probeQuery.isFetching}
-                  label={t('health.admin')}
-                  result={adminProbe}
-                />
+                {service.provider === 'opensource' ? (
+                  <CapabilityStatus
+                    isLoading={probeQuery.isFetching}
+                    label={t('health.admin')}
+                    result={adminProbe}
+                  />
+                ) : null}
                 <CapabilityStatus
                   isLoading={probeQuery.isFetching}
                   label={t('health.data')}
@@ -519,6 +649,11 @@ function ConnectionSettingsPanel() {
                 />
               </div>
 
+              {service.provider === 'volcengine' ? (
+                <p className="text-sm text-muted-foreground">
+                  {t('studio:cloudManagement')}
+                </p>
+              ) : null}
               {(serverMode === 'api_key' || serverMode === 'trusted') &&
               keyGuide ? (
                 <Alert className="border-primary/25 bg-primary/[0.045]">
@@ -551,6 +686,26 @@ function ConnectionSettingsPanel() {
               ) : null}
             </>
           )}
+          {saveError && (
+            <p role="alert" className="text-sm text-destructive">
+              {t('studio:profiles.invalidUrl')}
+            </p>
+          )}
+          <div className="flex justify-end">
+            <Button
+              onClick={() => {
+                if (!isValidConnectionUrl(draft.baseUrl)) {
+                  setSaveError(true)
+                  return
+                }
+                saveConnection(draft)
+                reconnect()
+              }}
+              disabled={JSON.stringify(draft) === JSON.stringify(connection)}
+            >
+              {t('studio:profiles.save')}
+            </Button>
+          </div>
         </CardContent>
       </Card>
     </div>

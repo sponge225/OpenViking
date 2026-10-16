@@ -25,7 +25,7 @@ from .models import Policy
 from .notices import without_notices
 from .protocols import clean_text, is_user, text_content, unwrap_client
 from .records import RecordKind as K
-from .tool_protocols import hidden_chain
+from .tool_protocols import reply_chain
 
 logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5
@@ -229,7 +229,7 @@ class CapturePipeline:
 
     async def stage(self, request, response, policy):
         messages = [*request.messages, *response.output]
-        chain = await asyncio.to_thread(hidden_chain, messages, request.protocol)
+        chain = reply_chain(request, response.output)
         while True:
             old = await self.queue.get(request.scope, request.session)
             if (

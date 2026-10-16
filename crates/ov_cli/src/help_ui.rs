@@ -525,10 +525,16 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
     CommandHelpSpec {
         path: &["search"],
         purpose: "Run experimental context-aware retrieval, optionally scoped to a session.",
-        examples: &[HelpItem {
-            label: "ov search \"what changed last time?\" --session-id abc123",
-            description: "Search with session context.",
-        }],
+        examples: &[
+            HelpItem {
+                label: "ov search \"what changed last time?\" --session-id abc123",
+                description: "Search with session context.",
+            },
+            HelpItem {
+                label: "ov search \"recent decisions\" --mode context",
+                description: "Assemble context ready to inject into a model.",
+            },
+        ],
         next_steps: &[HelpItem {
             label: "ov session get-session-context <id>",
             description: "Inspect the session context directly.",
@@ -766,7 +772,7 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
     },
     CommandHelpSpec {
         path: &["privacy"],
-        purpose: "Manage privacy config categories, targets, versions, and activation.",
+        purpose: "Manage privacy targets, field references, values, versions, and cleanup.",
         examples: &[
             HelpItem {
                 label: "ov privacy categories",
@@ -775,6 +781,22 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
             HelpItem {
                 label: "ov privacy get <category> <target>",
                 description: "Show active values for one target.",
+            },
+            HelpItem {
+                label: "ov privacy reference <category> <target> [field]",
+                description: "Show a reference; infer the field only when exactly one exists.",
+            },
+            HelpItem {
+                label: "ov privacy resolve <category> <target> [field]",
+                description: "Reveal a field; infer it only when exactly one exists.",
+            },
+            HelpItem {
+                label: "ov privacy upsert <category> <target> --field-<name> <value>",
+                description: "Update one field; --key and --key-<name> remain compatible.",
+            },
+            HelpItem {
+                label: "ov privacy scan --uri <viking-uri>",
+                description: "Dry-run one explicit URI under strict server resource limits.",
             },
         ],
         next_steps: &[HelpItem {
@@ -908,8 +930,8 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
         path: &["wait"],
         purpose: "Wait for queued async processing to complete.",
         examples: &[HelpItem {
-            label: "ov wait --timeout 120",
-            description: "Wait up to two minutes.",
+            label: "ov wait",
+            description: "Wait for queued processing to complete.",
         }],
         next_steps: &[
             HelpItem {
@@ -2927,6 +2949,8 @@ mod tests {
         assert!(find_help.contains("Maximum final results returned"));
         assert!(search_help.contains("Maximum results per search pass."));
         assert!(search_help.contains("Search may merge multiple passes"));
+        assert!(search_help.contains("--mode <list|context>"));
+        assert!(search_help.contains("ignored in context mode"));
     }
 
     #[test]
@@ -2964,27 +2988,6 @@ mod tests {
         assert!(rendered.contains("ov status [OPTIONS]"));
         assert!(rendered.contains("ov status --verbose"));
         assert!(rendered.contains("Show full component tables"));
-    }
-
-    #[test]
-    fn curated_help_lists_timeout_for_waiting_commands() {
-        for args in [
-            ["ov", "add-resource", "--help"],
-            ["ov", "rm", "--help"],
-            ["ov", "write", "--help"],
-        ] {
-            let rendered = strip_ansi(
-                &render_command_help_request(&os_args(&args)).expect("help should render"),
-            );
-            assert!(
-                rendered.contains("--timeout <seconds>"),
-                "missing timeout option in:\n{rendered}"
-            );
-            assert!(
-                rendered.contains("seconds"),
-                "missing timeout description in:\n{rendered}"
-            );
-        }
     }
 
     #[test]
@@ -3186,7 +3189,7 @@ mod tests {
             ),
             (
                 "privacy",
-                "Manage privacy config categories, targets, versions, and activation.",
+                "Manage privacy targets, field references, values, versions, and cleanup.",
             ),
             ("admin", "Manage accounts, users, roles, and API keys."),
             (

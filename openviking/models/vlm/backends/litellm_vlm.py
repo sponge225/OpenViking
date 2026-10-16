@@ -16,6 +16,7 @@ import litellm
 from litellm import acompletion, completion
 from litellm.types.utils import all_litellm_params
 
+from openviking.models.model_error import model_error_boundary
 from openviking.telemetry import tracer
 from openviking.utils.message_format import format_messages, sanitize_openai_messages
 from openviking.utils.multimodal import redact_image_data_urls
@@ -454,6 +455,7 @@ class LiteLLMVLMProvider(VLMBase):
             kwargs_messages = [{"role": "user", "content": content}]
         return self._build_kwargs(model, kwargs_messages, tools, tool_choice, thinking=thinking)
 
+    @model_error_boundary
     def get_completion(
         self,
         prompt: str = "",
@@ -477,6 +479,7 @@ class LiteLLMVLMProvider(VLMBase):
 
         return _call()
 
+    @model_error_boundary
     async def get_completion_async(
         self,
         prompt: str = "",
@@ -508,6 +511,7 @@ class LiteLLMVLMProvider(VLMBase):
 
         return await _call()
 
+    @model_error_boundary
     def get_vision_completion(
         self,
         prompt: str = "",
@@ -531,6 +535,7 @@ class LiteLLMVLMProvider(VLMBase):
 
         return _call()
 
+    @model_error_boundary
     async def get_vision_completion_async(
         self,
         prompt: str = "",

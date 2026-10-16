@@ -15,6 +15,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from typing_extensions import deprecated
 
+from openviking.core.identifiers import validate_identifier_length
 from openviking.pyagfs import AGFSAlreadyExistsError, AGFSNotFoundError, AsyncAGFSClient
 from openviking.pyagfs.async_client import fs_ctx_from_agfs_path
 from openviking.server.account_stores.base import AccountStore
@@ -468,6 +469,8 @@ class FileStore(AccountStore):
         validate_file_account_id(account_id)
         if error := validate_user_id(admin_user_id):
             raise InvalidArgumentError(error)
+        if error := validate_identifier_length(admin_user_id, "admin_user_id"):
+            raise InvalidArgumentError(error)
         if account_id in self._accounts:
             raise AlreadyExistsError(account_id, "account")
 
@@ -524,6 +527,8 @@ class FileStore(AccountStore):
         """Create a user, optionally including its initial API key."""
         resolved_role = validate_account_user_role(role)
         if error := validate_user_id(user_id):
+            raise InvalidArgumentError(error)
+        if error := validate_identifier_length(user_id, "user_id"):
             raise InvalidArgumentError(error)
         self._ensure_account_active(account_id)
         account = self._accounts.get(account_id)
@@ -644,6 +649,11 @@ class FileStore(AccountStore):
                 error = validate_user_id(user_id)
                 if error:
                     raise InvalidArgumentError(error)
+                account = self._accounts.get(account_id)
+                if account is None or user_id not in account.users:
+                    error = validate_identifier_length(user_id, "user_id")
+                    if error:
+                        raise InvalidArgumentError(error)
 
         created_accounts = 0
         created_users = 0

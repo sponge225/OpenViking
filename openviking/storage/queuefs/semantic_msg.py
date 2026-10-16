@@ -60,6 +60,8 @@ class SemanticMsg:
     # Additional flags
     skip_vectorization: bool = False
     telemetry_id: str = ""
+    task_id: str = ""
+    _task_work_id: str = ""
     target_uri: str = ""
     lock_handoff: Optional[Dict[str, Any]] = None
     is_code_repo: bool = False
@@ -102,6 +104,8 @@ class SemanticMsg:
         role: str = "root",
         skip_vectorization: bool = False,
         telemetry_id: str = "",
+        task_id: str = "",
+        _task_work_id: str = "",
         target_uri: str = "",
         lock_handoff: Optional[Dict[str, Any]] = None,
         is_code_repo: bool = False,
@@ -141,6 +145,8 @@ class SemanticMsg:
         self.role = role
         self.skip_vectorization = skip_vectorization
         self.telemetry_id = telemetry_id
+        self.task_id = task_id
+        self._task_work_id = _task_work_id
         self.target_uri = target_uri
         self.lock_handoff = lock_handoff
         self.is_code_repo = is_code_repo
@@ -224,6 +230,8 @@ class SemanticMsg:
             role=data.get("role", "root"),
             skip_vectorization=data.get("skip_vectorization", False),
             telemetry_id=data.get("telemetry_id", ""),
+            task_id=data.get("task_id", ""),
+            _task_work_id=data.get("_task_work_id", ""),
             target_uri=data.get("target_uri", ""),
             lock_handoff=data.get("lock_handoff"),
             is_code_repo=data.get("is_code_repo", False),

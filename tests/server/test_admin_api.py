@@ -40,6 +40,10 @@ from openviking.service.task_store import (
     SYSTEM_TASK_USER_ID,
 )
 from openviking.service.task_tracker import get_task_tracker
+from openviking.service.task_work_index import (
+    TaskWorkRejected,
+    bind_task_context,
+)
 from openviking.session.memory.account_templates import (
     EDITABLE_MEMORY_TEMPLATE_FIELDS,
     account_memory_template_path,
@@ -101,8 +105,8 @@ class _FakeAGFS:
     def pathlock_acquire_exact(self, ctx, path, timeout_secs=0.0, owner_lease_ref=None):
         return {"lease_ref": f"test:{path}"}
 
-    def pathlock_acquire_exact_batch(self, ctx, paths, timeout_secs=0.0, owner_lease_ref=None):
-        return self.pathlock_acquire_exact(ctx, paths[0], timeout_secs, owner_lease_ref)
+    async def pathlock_acquire_batch_async(self, ctx, requests, *args):
+        return self.pathlock_acquire_exact(ctx, requests[0]["path"], *args)
 
     def pathlock_release(self, ctx, lease):
         return None
@@ -319,8 +323,6 @@ async def test_delete_account_files_disables_automatic_pathlock(monkeypatch):
     agfs.stat = AsyncMock(side_effect=AGFSNotFoundError(path))
     service = Mock()
     service.viking_fs._async_agfs = agfs
-    tracker = Mock()
-    monkeypatch.setattr("openviking.service.deletion.get_task_tracker", lambda: tracker)
     deletion = DeletionService(
         service=service,
         manager=Mock(),
@@ -330,7 +332,6 @@ async def test_delete_account_files_disables_automatic_pathlock(monkeypatch):
     await deletion._delete_account_files("account-to-delete")
 
     agfs.rm.assert_awaited_once_with(path, recursive=True, auto_pathlock=False)
-    tracker.forget_account_tasks.assert_called_once_with("account-to-delete")
 
 
 @pytest_asyncio.fixture
@@ -1036,10 +1037,12 @@ async def test_account_memory_templates_range_expressions_reach_file_body(
     fs = lightweight_admin_app.state.fake_service.viking_fs
     snapshot = await resolve_account_memory_registry(fs, account_id, MemoryTypeRegistry())
     schema = snapshot.get("events")
-    context = ExtractContext([
-        Message(id="m1", role="user", parts=[TextPart("Selected source message")]),
-        Message(id="m2", role="user", parts=[TextPart("Unrelated source message")]),
-    ])
+    context = ExtractContext(
+        [
+            Message(id="m1", role="user", parts=[TextPart("Selected source message")]),
+            Message(id="m2", role="user", parts=[TextPart("Unrelated source message")]),
+        ]
+    )
     rendered = MemoryFileUtils.write(
         MemoryFile(memory_type="events", extra_fields={"ranges": "0", "summary": "summary"}),
         content_template=schema.content_template,
@@ -1362,29 +1365,33 @@ async def test_account_memory_templates_locked_fields_cannot_be_modified(
         for key, value in defaults.items()
         if key not in editable
     ]
-    invalid.extend([
-        {"unknown": "ignored?"},
-        {"Description": "wrong key"},
-        {"_updated_at": "forged"},
-        {"_account_content_template": False},
-        {"deployment_content_template": "forged"},
-        {"enabled": 1},
-        {"fields": [{"name": "renamed_field", "description": "changed"}]},
-        {"description": None},
-        {"description": " \n"},
-        {"fields": [None]},
-    ])
+    invalid.extend(
+        [
+            {"unknown": "ignored?"},
+            {"Description": "wrong key"},
+            {"_updated_at": "forged"},
+            {"_account_content_template": False},
+            {"deployment_content_template": "forged"},
+            {"enabled": 1},
+            {"fields": [{"name": "renamed_field", "description": "changed"}]},
+            {"description": None},
+            {"description": " \n"},
+            {"fields": [None]},
+        ]
+    )
     for field in defaults["fields"]:
         invalid.extend(
             {"fields": [{"name": field["name"], key: None if value is not None else "changed"}]}
             for key, value in field.items()
             if key not in {"name", "description"}
         )
-        invalid.extend([
-            {"fields": [{"name": field["name"], "unknown": "ignored?"}]},
-            {"fields": [{"name": field["name"], "description": ""}]},
-            {"fields": [{"name": field["name"]}, {"name": field["name"]}]},
-        ])
+        invalid.extend(
+            [
+                {"fields": [{"name": field["name"], "unknown": "ignored?"}]},
+                {"fields": [{"name": field["name"], "description": ""}]},
+                {"fields": [{"name": field["name"]}, {"name": field["name"]}]},
+            ]
+        )
     if memory_type == "events":
         invalid.extend(
             {"fields": [{"name": name, "description": "changed"}]} for name in ("goal", "ranges")
@@ -2378,18 +2385,29 @@ async def test_delete_account(
             account_id=SYSTEM_TASK_ACCOUNT_ID,
             user_id=SYSTEM_TASK_USER_ID,
         )
-        await queue.enqueue({
-            "task_id": user_cleanup.task_id,
-            "account_id": acct,
-            "user_id": "alice",
-            "target": {"account_id": acct, "user_id": "bob"},
-        })
-        await queue.enqueue({
-            "task_id": late_task_id,
-            "account_id": SYSTEM_TASK_ACCOUNT_ID,
-            "user_id": SYSTEM_TASK_USER_ID,
-            "target": {"account_id": acct, "user_id": "bob"},
-        })
+        with bind_task_context(user_cleanup.task_id, acct, "alice"):
+            with pytest.raises(TaskWorkRejected, match="unavailable"):
+                await queue.enqueue(
+                    {
+                        "task_id": user_cleanup.task_id,
+                        "account_id": acct,
+                        "user_id": "alice",
+                        "target": {"account_id": acct, "user_id": "bob"},
+                    }
+                )
+        with bind_task_context(
+            late_task_id,
+            SYSTEM_TASK_ACCOUNT_ID,
+            SYSTEM_TASK_USER_ID,
+        ):
+            await queue.enqueue(
+                {
+                    "task_id": late_task_id,
+                    "account_id": SYSTEM_TASK_ACCOUNT_ID,
+                    "user_id": SYSTEM_TASK_USER_ID,
+                    "target": {"account_id": acct, "user_id": "bob"},
+                }
+            )
         skipped = await _wait_for_task(admin_client, late_task_id)
         assert skipped["status"] == "completed"
         assert skipped["result"] == {"deleted": not recreated, "stale": True}
@@ -3521,10 +3539,12 @@ async def test_server_restart_requires_root_and_valid_revision(
         server_overrides = {"host": cli_host}
         lightweight_admin_app.state.server_config_overrides = server_overrides
     path.write_text(
-        json.dumps({
-            "server": server,
-            "vlm": {"provider": "openai", "model": "gpt-4o", "api_key": "test-key"},
-        })
+        json.dumps(
+            {
+                "server": server,
+                "vlm": {"provider": "openai", "model": "gpt-4o", "api_key": "test-key"},
+            }
+        )
     )
     monkeypatch.setattr(OpenVikingConfigSingleton, "_config_file", path)
     monkeypatch.setattr(OpenVikingConfigSingleton, "_config_file_content", path.read_bytes())

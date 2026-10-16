@@ -6,7 +6,6 @@ import pytest
 from openviking.storage.queuefs.semantic_msg import SemanticMsg
 from openviking.storage.queuefs.semantic_processor import SemanticProcessor
 from openviking.storage.viking_fs import SyncDiff
-from openviking.telemetry.request_wait_tracker import RequestWaitTracker
 
 
 def _processor(**kwargs):
@@ -257,107 +256,6 @@ async def test_embedding_lock_wait_skips_semantic_execution(monkeypatch):
 
     assert _FakeTreeExecutor.calls == []
     scope.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_batch_lock_coordinator_requeues_while_sibling_work_is_pending(monkeypatch):
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.get_viking_fs",
-        lambda: _FakeVikingFS(),
-    )
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.is_semantic_msg_stale",
-        lambda msg: False,
-    )
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.asyncio.sleep",
-        AsyncMock(),
-    )
-    tracker = RequestWaitTracker()
-    telemetry_id = "tm_batch_coordinator_requeue"
-    tracker.register_request(telemetry_id)
-    tracker.register_semantic_root(telemetry_id, "coordinator")
-    tracker.register_semantic_root(telemetry_id, "semantic-1")
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.get_request_wait_tracker",
-        lambda: tracker,
-    )
-
-    work = SimpleNamespace(
-        scope=SimpleNamespace(lock={"id": "batch-lock"}),
-        start=lambda: None,
-        resolve_telemetry=lambda: None,
-        acquire_lock=AsyncMock(return_value=True),
-        reenqueue=AsyncMock(),
-        close=AsyncMock(),
-    )
-    processor = SemanticProcessor(vlm_resolver=None)
-    monkeypatch.setattr(processor, "_message_work", lambda msg, lock=None: work)
-    msg = SemanticMsg(
-        uri="viking://resources/wiki",
-        context_type="resource",
-        telemetry_id=telemetry_id,
-        lock_handoff={"owner_id": "producer"},
-        wait_for_request_completion=True,
-    )
-    msg.id = "coordinator"
-
-    result = await processor.on_dequeue(msg.to_dict())
-
-    assert result.outcome.value == "requeued"
-    work.reenqueue.assert_awaited_once()
-    work.close.assert_awaited_once()
-    assert tracker.build_queue_status(telemetry_id)["Semantic"]["requeue_count"] == 0
-
-    tracker.mark_semantic_done(telemetry_id, "semantic-1")
-    tracker.mark_semantic_done(telemetry_id, "coordinator")
-    tracker.cleanup(telemetry_id)
-
-
-@pytest.mark.asyncio
-async def test_batch_lock_coordinator_releases_after_sibling_work_settles(monkeypatch):
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.get_viking_fs",
-        lambda: _FakeVikingFS(),
-    )
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.SemanticTreeExecutor",
-        _FakeTreeExecutor,
-    )
-    scope = SimpleNamespace(lock={"id": "batch-lock"}, close=AsyncMock())
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.SemanticLockScope.resolve",
-        AsyncMock(return_value=scope),
-    )
-    tracker = RequestWaitTracker()
-    telemetry_id = "tm_batch_coordinator_release"
-    tracker.register_request(telemetry_id)
-    tracker.register_semantic_root(telemetry_id, "coordinator")
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.get_request_wait_tracker",
-        lambda: tracker,
-    )
-
-    _FakeTreeExecutor.calls = []
-    _FakeTreeExecutor.runs = []
-    processor = SemanticProcessor(vlm_resolver=None)
-    msg = SemanticMsg(
-        uri="viking://resources/wiki",
-        context_type="resource",
-        telemetry_id=telemetry_id,
-        lock_handoff={"owner_id": "producer"},
-        wait_for_request_completion=True,
-    )
-    msg.id = "coordinator"
-
-    result = await processor.on_dequeue(msg.to_dict())
-
-    assert result.outcome.value == "success"
-    assert _FakeTreeExecutor.calls == []
-    scope.close.assert_awaited_once()
-    assert tracker.is_complete(telemetry_id) is True
-    assert tracker.build_queue_status(telemetry_id)["Semantic"]["processed"] == 0
-    tracker.cleanup(telemetry_id)
 
 
 @pytest.mark.asyncio

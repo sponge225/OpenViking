@@ -14,7 +14,6 @@ from openviking.storage.queuefs import SemanticMsg, get_queue_manager
 from openviking.storage.queuefs.semantic_msg import build_semantic_coalesce_key
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
 from openviking.telemetry import get_current_telemetry
-from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.utils.ingest_options import IngestOptions
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.uri import VikingURI
@@ -217,25 +216,9 @@ class Summarizer:
                     if change.ingest_options != IngestOptions()
                 },
             )
-            if telemetry_id:
-                get_request_wait_tracker().register_semantic_root(telemetry_id, msg.id)
-            try:
-                enqueue_id = await semantic_queue.enqueue(msg)
-            except Exception as exc:
-                if telemetry_id:
-                    get_request_wait_tracker().mark_semantic_failed(
-                        telemetry_id,
-                        msg.id,
-                        str(exc),
-                    )
-                raise
+            enqueue_id = await semantic_queue.enqueue(msg)
             if enqueue_id == "deduplicated":
-                if telemetry_id:
-                    get_request_wait_tracker().mark_semantic_done(
-                        telemetry_id,
-                        msg.id,
-                        processed_delta=0,
-                    )
+                continue
             else:
                 enqueued_count += 1
         return {
@@ -350,23 +333,8 @@ class Summarizer:
                     file_abstracts=file_abstracts,
                     plan=semantic_plan,
                 )
-                if msg.telemetry_id:
-                    get_request_wait_tracker().register_semantic_root(msg.telemetry_id, msg.id)
-                try:
-                    enqueue_id = await semantic_queue.enqueue(msg)
-                except Exception as e:
-                    if msg.telemetry_id:
-                        get_request_wait_tracker().mark_semantic_failed(
-                            msg.telemetry_id, msg.id, str(e)
-                        )
-                    raise
+                enqueue_id = await semantic_queue.enqueue(msg)
                 if enqueue_id == "deduplicated":
-                    if msg.telemetry_id:
-                        get_request_wait_tracker().mark_semantic_done(
-                            msg.telemetry_id,
-                            msg.id,
-                            processed_delta=0,
-                        )
                     logger.info("Semantic generation already queued for: %s", target_uri)
                     continue
                 enqueued_count += 1

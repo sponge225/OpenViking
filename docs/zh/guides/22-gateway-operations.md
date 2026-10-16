@@ -42,6 +42,16 @@ description: 用 Docker Compose、Helm 或独立进程部署 OpenViking 网关�
 
 管理密钥不提供命令行参数，因为命令行参数会出现在进程列表和 shell 历史里。设置、更换或去掉管理密钥后需要重启，这不会吊销已签发的网关密钥，也不会改动已有的上游和上下文配置。
 
+#### 忘记网关管理密钥
+
+到网关读取它的位置查找：
+
+- 环境变量 `OPENVIKING_GATEWAY_MANAGEMENT_KEY` 优先于配置文件。Compose 部署一般写在 `docker-compose.yml` 旁边的 `.env` 里；Helm 从 `gateway.existingSecret` 指定的 Secret 中读取 `management-key` 字段。
+- 没有设置环境变量时，看 `ov.conf` 的 `gateway.management_key`（嵌入）或 `gateway.conf` 的 `management_key`（独立）。值写成 `$VAR` 时，密钥在对应的环境变量里。
+- 嵌入部署的 root 还可以在 Studio 的**设置** → **服务端配置** → **文件编辑**中查看 `ov.conf`。`openviking-server init` 和 Studio **开启网关**生成的密钥都以明文保存在这里。
+
+实在找不回来，就在原来的位置换一个至少 32 个字符的新值（可以用 `openssl rand -base64 32` 生成），然后重启。已签发的网关密钥、上游和上下文配置都不受影响。把环境变量设为空字符串不会清除文件里的值，需要删掉这个变量。
+
 ### 加密
 
 网关用 OpenViking 自己的加密功能保护已存的凭证和对话状态（见[加密指南](08-encryption.md)）：
@@ -122,7 +132,7 @@ v0.5 网关用自己的密钥加密数据，这些数据会在首次启动时转
 - `/` 跳转到 `/studio/`，Studio 只包含网关和连接页面。
 - `/health` 返回 `service: "openviking-gateway"`、`auth_mode` 和 `openviking_url`；请求带有效的 OpenViking 凭证时，还返回调用方身份。
 
-**对外地址。** 共享部署要把 `public_url` 设为客户端访问 Server（或独立网关）的地址，不带 `/gateway`，网关会自己加上。嵌入网关不设置时，沿用 Server 的对外地址（`OPENVIKING_PUBLIC_BASE_URL` 或 `server.public_base_url`）。Studio 的接入指南用它生成配置：Anthropic 客户端使用 `<public_url>/gateway`，OpenAI 风格的客户端使用 `<public_url>/gateway/v1`。不设置时，指南使用浏览器访问 Studio 的地址；但文件导入的上传链接必须依赖 `public_url`，见[导入文件和技能](#导入文件和技能)。
+**对外地址。** 共享部署要把 `public_url` 设为客户端访问 Server（或独立网关）的地址，不带 `/gateway`，网关会自己加上。嵌入网关不设置时，沿用 Server 的对外地址（`OPENVIKING_PUBLIC_BASE_URL` 或 `server.public_base_url`）。Studio 的接入指南用它生成配置：Anthropic 客户端使用 `<public_url>/gateway`，OpenAI 风格的客户端使用 `<public_url>/gateway/v1`。不设置时，指南使用浏览器访问 Studio 的地址；但上传和下载链接必须依赖 `public_url`，见[导入文件和技能](#导入文件和技能)。
 
 ### Docker Compose
 
@@ -215,7 +225,7 @@ ov.example.com {
 用 OpenViking API 密钥连接 Studio 后，在侧边栏打开 **OpenViking 网关**。上游和上下文配置由整个账号共享，网关密钥和请求日志属于各个用户：
 
 - **没有设置管理密钥**：每个登录的用户都能添加和修改本账号的上游和上下文配置。
-- **设置了管理密钥**：“上游”和“上下文配置”标签页变为只读，OpenViking 的 admin 和 root 也一样。只读时仍能查看和测试上游（看不到 API Key 和请求头），并在给自己签发密钥时选用。点**输入网关管理密钥**解锁编辑，页头会显示“可修改上游和上下文配置”；解锁状态保持到点击**锁定**或关闭浏览器标签页。管理密钥被更换后，Studio 会自动锁定。
+- **设置了管理密钥**：“上游”和“上下文配置”标签页变为只读，OpenViking 的 admin 和 root 也一样。只读时仍能查看上游（看不到 API Key 和请求头），并在给自己签发密钥时选用；模型测试会真实请求服务商并可能计费，因此需要写权限。点**输入网关管理密钥**解锁编辑和测试，页头会显示“可修改上游和上下文配置”；解锁状态保持到点击**锁定**或关闭浏览器标签页。管理密钥被更换后，Studio 会自动锁定。
 - **网关密钥**：每个人都能给自己签发；账号管理员可以给本账号的用户签发；root 先在侧边栏切换账号。见[网关密钥](#网关密钥)。
 
 上游和上下文配置保存后，立即对使用它们的密钥生效（上下文配置只影响之后开始的对话）。还没有可用的上游或上下文配置、自己又不能修改时，请联系部署网关的人。
@@ -246,8 +256,11 @@ ov.example.com {
   - Chat Completions 和 Responses 拼接 `/chat/completions` 或 `/responses`。只填域名时不会自动补 `/v1`，OpenAI 要写 `https://api.openai.com/v1`。
   - Anthropic Messages 拼接 `/v1/messages`，所以 Base URL 不能以 `/v1` 结尾，否则保存时被拒绝。
   - 末尾的斜杠会被去掉。`/api/paas/v4` 这类带版本路径的地址可以直接使用。
+  - Base URL 可以带查询参数，例如 `?api-version=…`。客户端的查询参数接在后面，同名参数以 Base URL 里的为准。
   - 客户端用方舟路径（`/gateway/api/v3/`、`/gateway/api/compatible/v1/`）发来的请求，按同样的规则拼接。
+  - Azure OpenAI v1 接口填 `https://RES.openai.azure.com/openai/v1`，Microsoft Foundry 上的 Claude 用 Anthropic Messages 协议、填 `https://RES.services.ai.azure.com/anthropic`，Gemini 的 OpenAI 兼容接口填 `https://generativelanguage.googleapis.com/v1beta/openai`，都按拼接规则使用。
   - 一个上游只有一个 Base URL。同一服务商的不同协议地址不同时，要分别建上游：例如智谱 Chat Completions 用 `https://open.bigmodel.cn/api/paas/v4`，Responses 用 `https://open.bigmodel.cn/api/v1`。方舟 Coding Plan 的 Chat Completions 和 Responses 用 `…/api/coding/v3`，Anthropic Messages 用 `…/api/coding`。
+- **拼接协议接口路径**默认开启。如果 Base URL 已经是完整的请求地址，可以关闭它；关闭后，网关把该协议的请求直接发往这个 URL，不再拼接协议路径。子路径接在后面：Anthropic 的 Token 计数发往 `…/count_tokens`。Embeddings、模型列表等其他接口不会路由到这样的上游，连接测试也会跳过它。例如 Azure OpenAI 部署：协议选 *Chat Completions*，服务商选*通用*，Base URL 填 `https://RES.openai.azure.com/openai/deployments/DEPLOYMENT/chat/completions?api-version=2024-10-21`，关闭这个开关，**密钥发送方式**选 *api-key 请求头*。
 
   编辑页会实时预览最终的请求地址；OpenAI、方舟这类地址漏掉路径，或者 Anthropic 地址多了 `/v1` 时，会给出提示和一键修正。
 
@@ -255,7 +268,9 @@ ov.example.com {
 
 - **API Key 由谁提供**：
   - **由网关保管 API Key**（默认）：网关发送上游的 API Key，客户端只需要网关密钥。
-  - **每个客户端自带 API Key**：每个请求除了网关密钥，还要在 `X-OpenViking-Upstream-Key` 请求头里带上客户端自己的服务商 API Key，缺少时返回 401 "Upstream API key is missing"。网关按服务商惯用的请求头转发这个 API Key，`X-OpenViking-*` 请求头本身从不转发。
+  - **每个客户端自带 API Key**：每个请求除了网关密钥，还要在 `X-OpenViking-Upstream-Key` 请求头里带上客户端自己的服务商 API Key，缺少时返回 401 "Upstream API key is missing"。网关按**密钥发送方式**转发这个 API Key（Base URL 含 `{api_key}` 时填进地址），`X-OpenViking-*` 请求头本身从不转发。
+- **密钥发送方式**（仅服务商为*通用*时）：`Authorization: Bearer`（默认）、`api-key` 请求头（Azure OpenAI）或 `x-api-key` 请求头。
+- **密钥放在地址里**：服务商要求把密钥写在地址里时，在 Base URL 的路径或查询参数中写 `{api_key}`，例如 `?key={api_key}`。网关发送时填入 URL 编码后的密钥，并且不再发送鉴权请求头。不要把密钥本身写进地址：能查看上游的人都能看到 Base URL。
 - **API Key 和额外请求头只写不读**：留空表示保留已存的值，删除请求头行就删除这个请求头。**修改 Base URL 会清除已存的 API Key 和请求头值**，所以每次改地址都要重新填写，已存的密钥不会被发往新地址。
 - **额外请求头**加在发往这个上游的每个请求上，例如服务商的版本或组织请求头，并覆盖客户端发送的同名请求头。不能设置 `Host`、`Content-Length`、`Transfer-Encoding` 和 `Connection`。
 - **这是 Coding Plan 或订阅密钥**：服务商通常只允许 Coding Plan 这类订阅密钥用在自家的编程工具里，通过共享网关使用可能导致订阅被封禁。勾选后，发往这个上游的请求一律被拒绝，返回 403 "Coding Plan upstreams are disabled; configure a model API key"，除非同时勾选**允许通过网关使用这个套餐**。网关无法从密钥本身分辨它是不是订阅密钥，需要你自己标记。Claude 订阅令牌（`sk-ant-oat…`）始终被拒绝。
@@ -278,7 +293,7 @@ ov.example.com {
 
 #### 测试和删除
 
-在上游列表里点**测试**，网关用已存的凭证请求服务商的模型列表，告诉你地址是否有响应、密钥是否被接受。只读用户也能测试。测试不验证具体模型，也不代表允许使用 Coding Plan；各种结果的含义见[连接测试](../api/25-gateway.md#连接测试)。
+有写权限时，在上游列表里点**测试**，网关先检查已保存配置的连接。连接成功后，再选择或输入模型名运行模型测试。网关使用已存的凭证发送一次很小的生成请求，验证接口地址、密钥、模型名和协议能否一起正常工作。上游允许 Gateway 工具时会带上 OpenViking 工具，reasoning effort 使用模型默认值。服务商可能对模型请求计费。Coding Plan 上游在授权网关使用前仍会阻止模型测试。各种结果的含义见[上游测试](../api/25-gateway.md#上游测试)。
 
 有密钥在用的上游不能删除：先吊销这些密钥，或者改为停用这个上游。
 
@@ -288,7 +303,8 @@ ov.example.com {
 
 - 结果分三组显示：已导入、需要确认、未导入。路径中带 `coding` 或 `plan` 的上游被标为 Coding Plan，确认服务商条款允许后，勾选**允许通过网关使用这个套餐**才能使用。
 - 重复导入不会产生重复的上游。再次导入时，地址、API Key、请求头、协议和服务商按服务端配置刷新；你在网关里改过的名称、启用状态、优先级、模型、别名、上下文窗口和 Coding Plan 确认都保留。
-- Codex OAuth 和 Azure 凭证、缺少 `api_base` 的 LiteLLM 凭证，以及不使用 OpenAI Chat Completions API 的 LiteLLM 路由会被跳过，原因见[导入 VLM 配置](../api/25-gateway.md#导入-vlm-配置)。
+- Azure OpenAI 凭证（服务商 `azure`，或 LiteLLM 的 `azure/<deployment>`）会导入为完整请求地址的上游，带上配置的 `api_version`，密钥放在 `api-key` 请求头里发送。
+- Codex OAuth 凭证、缺少 `api_base` 的 LiteLLM 凭证，以及不使用 OpenAI Chat Completions API 的 LiteLLM 路由会被跳过，原因见[导入 VLM 配置](../api/25-gateway.md#导入-vlm-配置)。
 
 ### 上下文配置
 
@@ -367,7 +383,7 @@ ov.example.com {
 
 **概览**标签页汇总日志保留期（默认 30 天）内最新的 10,000 条请求：
 
-- 第一个请求到达之前，显示**快速开始**清单，顺序是“上游 → 上下文配置 → 签发密钥 → 接入”。
+- 第一个请求到达之前，显示**快速开始**清单，顺序是“上游 → 上下文配置 → 签发密钥 → 接入”。还没有密钥时，清单里的**快速模式**卡片一键完成前三步：没有可用上游时导入 OpenViking 的 VLM 配置，没有上下文配置时用推荐设置新建一份，再为当前用户签发密钥。本地 dev 模式以外，root 改为在签发对话框里选择密钥归属的用户。
 - **请求数**：模型请求的数量、最近一次请求的时间，以及这些请求的输出 token。
 - **首次调用缓存命中率**：每条新用户消息的第一次模型调用中，命中服务商提示缓存的输入 token 所占比例。这是判断网关是否健康最重要的指标，应该接近不经过网关时服务商能达到的水平；明显下降通常说明网关发送的历史和上一次对不上了，见[首次调用缓存命中率下降](#首次调用缓存命中率下降)。
 - **轮内缓存命中率**：同一轮里后续调用的命中率，例如工具步骤和 OpenViking 工具的往返，通常很高。
@@ -426,8 +442,10 @@ ov.example.com {
 
 新建的上下文配置默认开启 **OpenViking 工具**，“使用推荐设置创建”也一样。**工具**清单来自你的 OpenViking 服务，默认只勾选只读工具：
 
-- **默认勾选**：`find`、`search`、`grep`、`glob`、`list`、`tree`、`read`、`list_watches`、`get_acl`、`list_users`、`list_groups` 和 `health`。
+- **默认勾选**：`find`、`search`、`grep`、`glob`、`list`、`tree`、`read`、`download`、`list_watches`、`get_acl`、`list_users`、`list_groups` 和 `health`。
 - **默认不勾选**（会修改数据）：`remember`、`write`、`edit`、`add_resource`、`add_skill`、`forget`、`set_acl` 和 `cancel_watch`。想让模型保存记忆就勾选 `remember`，想让它导入网页或附件就勾选 `add_resource`。
+
+`download` 返回一条一次性的 `curl` 命令，所以客户端需要有 shell 工具（哪些名称算 shell 工具见[导入文件和技能](#导入文件和技能)）。和上传链接一样，下载链接默认经过网关，指向 `public_url` 加 `/gateway/downloads`。把 `mcp_file_links` 设为 `direct` 后，网关原样透传 OpenViking 返回的上传和下载链接，链接直接指向 Server，此时 Server 的 `OPENVIKING_PUBLIC_BASE_URL`（或 `server.public_base_url`）必须是客户端能访问的地址。
 
 OpenViking 以后新增的工具会默认可用，已有对话仍沿用开始时的工具清单。已有的上下文配置保留原来的勾选。
 
@@ -485,7 +503,7 @@ OpenViking 以后新增的工具会默认可用，已有对话仍沿用开始时
 
 OpenViking 服务提供导入工具、上下文配置也勾选了它们时，模型就能导入资料。按 URL 导入不需要额外条件；导入本地文件需要以下两种方式之一：
 
-- **客户端有 shell 工具**（名称类似 bash、shell、exec_command、terminal 或 run_command）：导入工具返回一个一次性上传链接，模型再用客户端的 shell 工具上传文件，这一步经过客户端的权限确认。技能目录会先打包成 zip。链接指向 `public_url` 加 `/gateway/uploads`，所以 `public_url` 必须是客户端能访问的地址，前面的代理也要像其他路径一样转发它。没有设置 `public_url` 时，导入失败并提示 "Set gateway.public_url for client uploads"。
+- **客户端有 shell 工具**（名称类似 bash、shell、exec_command、terminal 或 run_command）：导入工具返回一个一次性上传链接，模型再用客户端的 shell 工具上传文件，这一步经过客户端的权限确认。技能目录会先打包成 zip。链接指向 `public_url` 加 `/gateway/uploads`，所以 `public_url` 必须是客户端能访问的地址，前面的代理也要像其他路径一样转发它。没有设置 `public_url` 时，导入失败并提示 "Set gateway.public_url for client uploads and downloads"。`mcp_file_links` 设为 `direct` 时，链接改为直接指向 OpenViking Server。
 - **用户消息带附件**：没有 shell 工具时，模型可以导入用户消息里附带的文件，文件可以是 base64 数据，也可以是附件文本，支持 Responses `input_file` 和 Anthropic `document.source` 中内嵌的 `base64`、`text` 数据。Open WebUI 通常只发送提取出的文本，这些文本作为文本文件导入。附件中的 URL 和服务商的文件 ID 不会被抓取；要导入远程资源，请用导入工具的 URL 参数。
 
 上传大小受 `max_body_bytes` 限制（默认 32 MiB）。
@@ -660,7 +678,8 @@ Token 预算只计算模型使用 OpenViking 工具时新增的调用、结果�
 | `port` | 独立 | `1935` | 监听端口 |
 | `workers` | 独立 | `1` | worker 进程数，1–64 |
 | `encryption` | 独立 | 不设置（明文） | 字段同 `ov.conf` 的 `encryption` 段，见[加密](#加密)；嵌入网关沿用 Server 的设置 |
-| `public_url` | 两者 | 空 | 客户端访问的对外地址，不带 `/gateway`（网关自己加）；嵌入时为空则沿用 Server 的对外地址；都没有时接入指南用请求来源地址，文件上传不可用 |
+| `public_url` | 两者 | 空 | 客户端访问的对外地址，不带 `/gateway`（网关自己加）；嵌入时为空则沿用 Server 的对外地址；都没有时接入指南用请求来源地址，MCP 文件上传和下载也不可用（`mcp_file_links` 为 `direct` 时除外） |
+| `mcp_file_links` | 两者 | `proxy` | MCP 上传和下载工具返回的链接如何交给客户端：`proxy` 改写为 `public_url` 加 `/gateway/uploads` 或 `/gateway/downloads`，需要设置 `public_url`；`direct` 原样透传 OpenViking 的链接，需要 Server 的 `OPENVIKING_PUBLIC_BASE_URL`（或 `server.public_base_url`）是客户端能访问的地址 |
 | `storage_path` | 两者 | `~/.openviking/gateway` | 本地存储目录 |
 | `management_key` | 两者 | 空 | 可选的网关管理密钥，至少 32 个字符 |
 | `min_server_version` | 两者 | `0.4.16` | 独立网关要求的 OpenViking Server 最低版本 |
@@ -719,6 +738,8 @@ URL 必须是 HTTP(S)，不能含凭证、查询参数或 fragment。未知字�
 | 协议 | `protocol` | | `anthropic`（Anthropic Messages）、`chat`（Chat Completions）或 `responses`（Responses）。 |
 | 服务商 | `vendor` | `generic` | `generic`、`anthropic`、`openai`、`deepseek`、`ark`（火山方舟）或 `byteplus`（BytePlus 方舟）。Studio 只提供服务商支持的协议，API 接受任意组合。 |
 | Base URL | `base_url` | | 服务商地址；默认地址和拼接规则见[上游](#上游)。 |
+| 拼接协议接口路径 | `append_endpoint_path` | `true` | 拼接所选协议的接口路径；关闭时把 `base_url` 直接作为完整请求地址。 |
+| 密钥发送方式 | `key_header` | `authorization` | `authorization`（Bearer）、`api-key` 或 `x-api-key`。`base_url` 含 `{api_key}` 时不生效。 |
 | API Key 由谁提供 | `auth_mode` | `managed` | `managed`（由网关保管 API Key）或 `passthrough`（每个客户端自带 API Key）。 |
 | API Key | `api_key` | | 只写，见[凭证](#凭证)。 |
 | 额外请求头 | `headers` | `{}` | 只写，见[凭证](#凭证)。 |
@@ -788,7 +809,7 @@ URL 必须是 HTTP(S)，不能含凭证、查询参数或 fragment。未知字�
 | 网关不支持 Trusted 模式（`trusted_mode_unsupported`） | 把 Server 改为 `api_key` 认证。 |
 | 网关连不上 OpenViking（`openviking_unreachable`） | 只出现在独立网关：检查 `openviking_url`（`gateway.conf` 或 `OPENVIKING_GATEWAY_OPENVIKING_URL`）和网络。 |
 
-“上游”和“上下文配置”标签页只读，是因为部署者设置了网关管理密钥：点**输入网关管理密钥**解锁。OpenViking 的 root 或 admin API 密钥不能解锁编辑；管理密钥被更换后（`management_key_invalid`），Studio 会重新锁定。
+“上游”和“上下文配置”标签页只读，是因为部署者设置了网关管理密钥：点**输入网关管理密钥**解锁。OpenViking 的 root 或 admin API 密钥不能解锁编辑；管理密钥被更换后（`management_key_invalid`），Studio 会重新锁定。没人记得密钥时，见[忘记网关管理密钥](#忘记网关管理密钥)。
 
 ### 签发密钥失败
 
@@ -862,12 +883,12 @@ URL 必须是 HTTP(S)，不能含凭证、查询参数或 fragment。未知字�
 - **对话所用的上下文配置关闭了压缩。** 修改配置只对新对话生效。
 - **压缩失败。** 请求详情会显示原因，网关 60 秒后再试。摘要总因长度上限被截断时，调大**摘要长度上限**。原因是 `still_over_threshold` 时，说明系统提示词、工具和摘要本身就占满了大部分窗口：调小**摘要长度上限**，或者检查模型的上下文窗口设置。
 
-### 文件导入失败
+### 文件导入或下载失败
 
-- "Set gateway.public_url for client uploads"：把 `public_url` 设为客户端能访问的地址。
-- 上传链接无法访问或返回 404：确认 `public_url` 不是旧的 `:1935` 地址，也没有以 `/gateway` 结尾，并且代理像其他路径一样转发 `/gateway/uploads`。
+- "Set gateway.public_url for client uploads and downloads"：把 `public_url` 设为客户端能访问的地址，或者把 `mcp_file_links` 设为 `direct`。
+- 上传或下载链接无法访问或返回 404：确认 `public_url` 不是旧的 `:1935` 地址，也没有以 `/gateway` 结尾，并且代理像其他路径一样转发 `/gateway/uploads` 和 `/gateway/downloads`。`mcp_file_links` 设为 `direct` 时，改查 Server 的 `OPENVIKING_PUBLIC_BASE_URL`。
 - 413：文件超过了 `max_body_bytes` 或代理的上限。
-- 502 "OpenViking upload is unavailable"：网关连不上 OpenViking Server。
+- 502 "OpenViking upload is unavailable" 或 "OpenViking download is unavailable"：网关连不上 OpenViking Server。
 - 模型没有导入工具：OpenViking 服务没有提供该工具，上下文配置没有勾选，或者当前请求不能使用网关工具。检查工具清单和请求详情。
 
 ### 降级请求的异常

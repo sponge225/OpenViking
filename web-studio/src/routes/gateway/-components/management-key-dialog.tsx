@@ -13,6 +13,7 @@ import {
   DialogFooter,
 } from '#/components/ui/dialog'
 import { getAccess, toGatewayError } from '../-lib/api'
+import { gatewayDocsUrl } from '../-lib/client-guides'
 import {
   MANAGEMENT_UNLOCK_EVENT,
   setManagementKey,
@@ -27,7 +28,7 @@ const MANAGEMENT_CONFIGS = [
 ]
 
 export function ManagementKeyDialog() {
-  const { t } = useTranslation('gateway')
+  const { t, i18n } = useTranslation('gateway')
   const { connection } = useGateway()
   const [open, setOpen] = React.useState(false)
   const [key, setKey] = React.useState('')
@@ -42,14 +43,14 @@ export function ManagementKeyDialog() {
     return () => window.removeEventListener(MANAGEMENT_UNLOCK_EVENT, show)
   }, [])
   const unlock = useMutation({
-    mutationFn: () => getAccess({ ...connection, managementKey: key.trim() }),
+    mutationFn: (candidate: typeof connection) => getAccess(candidate),
     // Storing the key changes the query scope, so gateway data reloads with it.
-    onSuccess: (access) => {
+    onSuccess: (access, candidate) => {
       if (!access.can_write_objects) {
         setError(t('management.invalid'))
         return
       }
-      setManagementKey(connection.baseUrl, key.trim())
+      setManagementKey(candidate.baseUrl, candidate.managementKey ?? '')
       setOpen(false)
       setKey('')
       toast.success(t('management.unlocked'))
@@ -73,7 +74,8 @@ export function ManagementKeyDialog() {
           className="grid gap-4"
           onSubmit={(event) => {
             event.preventDefault()
-            if (key.trim() && !wrongKey) unlock.mutate()
+            if (key.trim() && !wrongKey)
+              unlock.mutate({ ...connection, managementKey: key.trim() })
           }}
         >
           <details className="text-sm">
@@ -90,7 +92,19 @@ export function ManagementKeyDialog() {
                 {t('management.environment')}{' '}
                 <code>OPENVIKING_GATEWAY_MANAGEMENT_KEY</code>
               </li>
+              <li>{t('management.studio')}</li>
               <li>{t('management.prefix')}</li>
+              <li>
+                {t('management.reset')}{' '}
+                <a
+                  href={gatewayDocsUrl('operations', i18n.resolvedLanguage)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-foreground underline underline-offset-4"
+                >
+                  {t('management.resetDocs')}
+                </a>
+              </li>
             </ul>
           </details>
           <SettingField

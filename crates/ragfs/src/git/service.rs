@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::core::filesystem::FileSystem;
 use crate::core::types::FileInfo;
-use crate::core::{FsContextInner, FS_CTX};
+use crate::core::{FsContextInner, FsContextView, PathLockContext, FS_CTX};
 use crate::git::{
     error::{GitError, ObjectStoreError, RefStoreError},
     ignore::{should_track_path, IgnoreMatcher, OVGITIGNORE_PATH},
@@ -984,7 +984,17 @@ impl GitService {
             validate_project_dir(project_dir)?;
         }
 
-        let ctx = Arc::new(FsContextInner::new(req.account.clone()));
+        // Encrypted writeback must reuse the caller's tree lock rather than
+        // acquire a conflicting lock. The request remains the tenant authority.
+        let ctx = Arc::new(FsContextInner::with_pathlock(
+            req.account.clone(),
+            PathLockContext {
+                lease_ref: FsContextView::current()
+                    .pathlock_lease_ref()
+                    .map(str::to_owned),
+                ..Default::default()
+            },
+        ));
         FS_CTX.scope(ctx, self.restore_impl(req)).await
     }
 

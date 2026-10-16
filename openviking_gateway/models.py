@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ProtocolName = Literal["anthropic", "chat", "responses"]
+KEY_PLACEHOLDER = "{api_key}"
 
 # OpenViking MCP tools that change data; new profiles offer only the read-only ones.
 WRITE_TOOLS = (
@@ -88,7 +89,9 @@ class Upstream(BaseModel):
     name: str
     protocol: ProtocolName
     base_url: str
+    append_endpoint_path: bool = True
     api_key: str = ""
+    key_header: Literal["authorization", "api-key", "x-api-key"] = "authorization"
     auth_mode: Literal["managed", "passthrough"] = "managed"
     headers: dict[str, str] = Field(default_factory=dict)
     models: list[str] = Field(default_factory=list)
@@ -121,17 +124,22 @@ class Upstream(BaseModel):
             or not parsed.hostname
             or parsed.username
             or parsed.password
-            or parsed.query
-            or parsed.fragment
+            or "#" in value
         ):
-            raise ValueError(
-                "expected an HTTP(S) upstream URL without credentials, query or fragment"
-            )
-        return value.rstrip("/")
+            raise ValueError("expected an HTTP(S) upstream URL without credentials or fragment")
+        rest = value.replace(KEY_PLACEHOLDER, "")
+        if "{" in rest or "}" in rest or "{" in parsed.netloc:
+            raise ValueError("base_url may only use the {api_key} placeholder, outside the host")
+        base, mark, query = value.partition("?")
+        return base.rstrip("/") + mark + query
 
     @model_validator(mode="after")
     def validate_protocol_base(self):
-        if self.protocol == "anthropic" and urlsplit(self.base_url).path.endswith("/v1"):
+        if (
+            self.append_endpoint_path
+            and self.protocol == "anthropic"
+            and urlsplit(self.base_url).path.endswith("/v1")
+        ):
             raise ValueError(
                 "Anthropic base_url must not end in /v1; the gateway appends /v1/messages"
             )
@@ -148,6 +156,11 @@ class Upstream(BaseModel):
             ):
                 raise ValueError("invalid upstream header")
         return value
+
+
+class UpstreamTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class KeyRequest(BaseModel):

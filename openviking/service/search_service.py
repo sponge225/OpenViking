@@ -17,6 +17,7 @@ from openviking.utils.image_search import (
     is_http_url,
     is_viking_uri,
 )
+from openviking.utils.model_retry import model_retry_scope
 from openviking_cli.exceptions import InvalidArgumentError, NotInitializedError
 from openviking_cli.retrieve import ContextType
 from openviking_cli.utils import get_logger
@@ -29,7 +30,7 @@ logger = get_logger(__name__)
 
 def _validate_query(
     query: str,
-    image_url: Optional[str] = None,
+    image_url: str | list[str] | None = None,
     filter: Optional[Dict] = None,
 ) -> None:
     """Reject malformed query text or a request with nothing to search for.
@@ -94,9 +95,11 @@ class SearchService:
 
     async def _resolve_image_url(
         self,
-        image_url: Optional[str],
+        image_url: str | list[str] | None,
         ctx: RequestContext,
-    ) -> Optional[str]:
+    ) -> str | list[str] | None:
+        if isinstance(image_url, list):
+            return [await self._resolve_image_url(url, ctx) for url in image_url]
         if not image_url:
             return None
         if is_viking_uri(image_url):
@@ -109,6 +112,7 @@ class SearchService:
             "image_url must be a data:image base64 URI, http(s) URL, or viking:// URI."
         )
 
+    @model_retry_scope(0)
     async def search(
         self,
         query: str,
@@ -119,7 +123,7 @@ class SearchService:
         score_threshold: Optional[float] = None,
         filter: Optional[Dict] = None,
         level: Optional[List[int]] = None,
-        image_url: Optional[str] = None,
+        image_url: str | list[str] | None = None,
         events_time_decay_protection: Optional[str] = None,
         search_type: SearchType = "semantic",
         context_types: Optional[List[ContextType]] = None,
@@ -167,6 +171,7 @@ class SearchService:
         )
         return result
 
+    @model_retry_scope(0)
     async def find(
         self,
         query: str,
@@ -176,7 +181,7 @@ class SearchService:
         score_threshold: Optional[float] = None,
         filter: Optional[Dict] = None,
         level: Optional[List[int]] = None,
-        image_url: Optional[str] = None,
+        image_url: str | list[str] | None = None,
         events_time_decay_protection: Optional[str] = None,
         search_type: SearchType = "semantic",
     ) -> Any:

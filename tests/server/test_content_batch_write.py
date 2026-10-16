@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 from types import SimpleNamespace
@@ -7,6 +8,13 @@ import pytest
 
 import openviking.storage.content_write as content_write_module
 from openviking.server.identity import RequestContext, Role
+from openviking.service.task_store import PersistentTaskStore
+from openviking.service.task_tracker import TaskTracker, get_task_tracker, run_tracked_operation
+from openviking.service.task_work_index import (
+    bind_task_context,
+    get_task_context,
+    record_enqueued_work,
+)
 from openviking.session.memory.dataclass import MemoryFile
 from openviking.session.memory.utils import MemoryFileUtils
 from openviking.storage.content_write import ContentWriteCoordinator
@@ -15,6 +23,7 @@ from openviking.storage.context_update_plan import (
     ContextUpdatePlan,
     FileRefreshIntent,
 )
+from openviking.storage.queuefs.queue_middleware import EnqueueReceipt
 from openviking.storage.queuefs.semantic_ops.freshness_policy import FreshnessAction
 from openviking.telemetry.context import bind_telemetry
 from openviking.telemetry.operation import OperationTelemetry
@@ -25,6 +34,7 @@ from openviking_cli.exceptions import (
     OpenVikingError,
 )
 from openviking_cli.session.user_id import UserIdentifier
+from tests.test_task_tracker import _FakeAgfs
 
 
 class _PathLockClient:
@@ -119,19 +129,21 @@ def _coordinator_queue_for_unit_tests(monkeypatch, request):
         yield None
         return
 
-    queue = SimpleNamespace(enqueue=AsyncMock(return_value="queued"))
+    queue = SimpleNamespace(enqueue=AsyncMock(return_value=EnqueueReceipt("queued", "work-1")))
     queue_manager = SimpleNamespace(
         SEMANTIC="semantic",
         get_queue=lambda *args, **kwargs: queue,
     )
     monkeypatch.setattr(content_write_module, "get_queue_manager", lambda: queue_manager)
-    yield queue
+    tracker = TaskTracker(PersistentTaskStore(_FakeAgfs()))
+    monkeypatch.setattr("openviking.service.task_tracker._instance", tracker)
 
-    tracker = content_write_module.get_request_wait_tracker()
-    for call in queue.enqueue.await_args_list:
-        msg = call.args[0]
-        if msg.wait_for_request_completion:
-            tracker.mark_semantic_done(msg.telemetry_id, msg.id, processed_delta=0)
+    async def run_tracked_operation(_task_type, *, operation, **_kwargs):
+        with bind_task_context("test-task", "default", "default", enqueued_work=[]):
+            return await operation(), "test-task"
+
+    monkeypatch.setattr(content_write_module, "run_tracked_operation", run_tracked_operation)
+    yield queue
 
 
 @pytest.mark.asyncio
@@ -677,7 +689,25 @@ async def test_batch_hands_off_file_locks_after_one_aggregated_refresh(monkeypat
     locks = vfs._async_agfs
     coordinator = ContentWriteCoordinator(vfs)
     calls = []
-    queue = SimpleNamespace(enqueue=AsyncMock(return_value="queued"))
+    workers = []
+    tracker = get_task_tracker()
+
+    async def enqueue(msg):
+        context = get_task_context()
+        owner = {"account_id": context.account_id, "user_id": context.user_id}
+        await tracker.register_work(context.task_id, "coordinator", "Semantic", **owner)
+        record_enqueued_work("Semantic", "coordinator")
+
+        async def finish_after_producer():
+            await tracker.wait_for_task_work(
+                context.task_id, exclude_work_id="coordinator", poll_interval=0.001, **owner
+            )
+            await tracker.mark_work_done(context.task_id, "coordinator", **owner)
+
+        workers.append(asyncio.create_task(finish_after_producer()))
+        return EnqueueReceipt("queued", "coordinator")
+
+    queue = SimpleNamespace(enqueue=AsyncMock(side_effect=enqueue))
     queue_manager = SimpleNamespace(
         SEMANTIC="semantic",
         get_queue=lambda *args, **kwargs: queue,
@@ -691,29 +721,34 @@ async def test_batch_hands_off_file_locks_after_one_aggregated_refresh(monkeypat
 
     monkeypatch.setattr(coordinator, "_refresh_batch", refresh)
     monkeypatch.setattr(content_write_module, "get_queue_manager", lambda: queue_manager)
+    monkeypatch.setattr(content_write_module, "run_tracked_operation", run_tracked_operation)
     ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
-    with bind_telemetry(telemetry):
-        result = await coordinator.batch_write(
-            root_uri=root,
-            operations=[
-                {"uri": b, "content": "B", "mode": "upsert"},
-                {"uri": a, "content": "A", "mode": "upsert"},
-            ],
-            ctx=ctx,
-            wait=False,
-        )
+    try:
+        with bind_telemetry(telemetry):
+            result = await asyncio.wait_for(
+                coordinator.batch_write(
+                    root_uri=root,
+                    operations=[
+                        {"uri": b, "content": "B", "mode": "upsert"},
+                        {"uri": a, "content": "A", "mode": "upsert"},
+                    ],
+                    ctx=ctx,
+                    wait=True,
+                ),
+                timeout=1,
+            )
+    finally:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
     assert vfs.writes == [a, b]
     assert result["created"] == [a, b]
+    assert result["queue_status"]["Semantic"]["processed"] == 1
     assert calls == [{a: "added", b: "added"}]
     assert locks.releases == 0
     assert locks.handoffs == 1
     coordinator_msg = queue.enqueue.await_args.args[0]
     assert coordinator_msg.wait_for_request_completion is True
-    content_write_module.get_request_wait_tracker().mark_semantic_done(
-        telemetry.telemetry_id,
-        coordinator_msg.id,
-        processed_delta=0,
-    )
 
 
 @pytest.mark.asyncio
@@ -1008,7 +1043,6 @@ async def test_batch_refresh_groups_resource_and_memory_work(monkeypatch):
         },
         ctx=ctx,
         wait=False,
-        timeout=None,
         telemetry_id="",
     )
     assert len(semantic_calls) == 1
@@ -1060,7 +1094,7 @@ async def test_batch_write_api_upserts_files(client_with_resource):
 
     waited = await client.post(
         "/api/v1/system/wait",
-        json={"timeout": 30.0},
+        json={},
     )
     assert waited.status_code == 200
 

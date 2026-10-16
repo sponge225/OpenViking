@@ -31,6 +31,7 @@ from .consts import (
 )
 from .embedding_config import EmbeddingConfig
 from .encryption_config import EncryptionConfig
+from .expiry_config import ExpiryConfig
 from .git_config import GitConfig
 from .glob_config import GlobConfig
 from .grep_config import GrepConfig
@@ -464,6 +465,21 @@ class OpenVikingConfig(BaseModel):
 
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
 
+    expiry: ExpiryConfig = Field(
+        default_factory=ExpiryConfig,
+        description="Distributed expiry scheduling configuration",
+    )
+
+    @model_validator(mode="after")
+    def _validate_expiry_backend(self) -> "OpenVikingConfig":
+        self._check_expiry_backend()
+        return self
+
+    def _check_expiry_backend(self) -> None:
+        idle = self.memory.session_auto_commit
+        if idle.enabled and idle.idle_backend == "redis":
+            self.expiry.validate_for_runtime()
+
     agent_evolution: AgentEvolutionConfig = RuntimeField(
         default_factory=AgentEvolutionConfig,
         description="Dynamic cluster default for Agent Evolution.",
@@ -495,7 +511,7 @@ class OpenVikingConfig(BaseModel):
         ),
     )
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {"arbitrary_types_allowed": True, "hide_input_in_errors": True}
 
     @classmethod
     def from_dict(cls, config: Dict[str, Any]) -> "OpenVikingConfig":
@@ -582,7 +598,8 @@ class OpenVikingConfig(BaseModel):
                             error=e,
                             path_prefix="memory",
                         )
-                    ) from e
+                    ) from None
+            instance._check_expiry_backend()
 
             # Apply parser configurations
             for parser_type in parser_types:
@@ -615,7 +632,9 @@ class OpenVikingConfig(BaseModel):
                     )
             return instance
         except ValidationError as e:
-            raise ValueError(format_validation_error(root_model=cls, error=e)) from e
+            # The formatted error omits input values; do not reattach a raw
+            # validation traceback which could expose nested credentials.
+            raise ValueError(format_validation_error(root_model=cls, error=e)) from None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""

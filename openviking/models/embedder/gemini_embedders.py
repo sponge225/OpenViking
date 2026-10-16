@@ -20,6 +20,7 @@ from openviking.models.embedder.base import (
     EmbedResult,
     truncate_and_normalize,
 )
+from openviking.models.model_error import model_error_boundary
 from openviking_cli.utils import get_logger
 
 logger = get_logger(__name__)
@@ -184,6 +185,7 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
             f"task_type={self.task_type!r})"
         )
 
+    @model_error_boundary
     def embed(
         self,
         text: str,
@@ -225,6 +227,7 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
         except (APIError, ClientError) as e:
             _raise_api_error(e, self.model_name)
 
+    @model_error_boundary
     async def embed_async(
         self,
         text: str,

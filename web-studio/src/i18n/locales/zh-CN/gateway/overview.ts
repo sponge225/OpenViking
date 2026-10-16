@@ -61,6 +61,25 @@ const overview = {
       action: '查看接入指南',
     },
   },
+  quick: {
+    title: '快速模式',
+    description: '跳过下面的步骤，一键拿到可以直接使用的网关密钥。',
+    upstreamImport:
+      '上游：导入 OpenViking 服务端的模型配置，沿用它的 API Key 和额度',
+    upstreamUse: '上游：使用 {{names}}（{{models}}，{{protocol}}）',
+    profileCreate: '上下文配置：用推荐设置新建“{{name}}”',
+    profileUse: '上下文配置：使用“{{name}}”',
+    keySelf: '密钥：为 {{user}} 签发',
+    keyPick: '密钥：下一步选择密钥归属的 OpenViking 用户',
+    action: '一键生成密钥',
+    running: '生成中…',
+    retry: '重试',
+    locked: '创建上下文配置或导入模型需要网关管理密钥。',
+    noUsable:
+      'OpenViking 的模型配置里没有网关能直接转发的模型。处理下面列出的问题，或者在第 1 步手动添加上游。',
+    keyName: '快速模式',
+    divider: '或者按步骤手动配置',
+  },
   kpi: {
     requests: {
       label: '请求数',

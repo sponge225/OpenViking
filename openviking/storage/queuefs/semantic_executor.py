@@ -516,6 +516,8 @@ class SemanticTreeExecutor:
                 self._task_context.task_id,
                 self._task_context.account_id,
                 self._task_context.user_id,
+                enqueued_work=self._task_context.enqueued_work,
+                work_id=self._task_context.work_id,
             )
             if self._task_context is not None
             else detach_task_context()

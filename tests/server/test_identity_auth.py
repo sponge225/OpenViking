@@ -124,7 +124,7 @@ async def test_trusted_explicit_user_role_with_root_key(runtime):
     assert identity.role == Role.USER
 
 
-async def test_oversized_trusted_account_does_not_block_valid_registration(runtime):
+async def test_oversized_trusted_identity_does_not_block_valid_registration(runtime):
     request = await make_request(runtime, "trusted", trusted_flush_interval=300)
     plugin = request.app.state.auth_plugin
     account_id = "a" * 255
@@ -140,14 +140,15 @@ async def test_oversized_trusted_account_does_not_block_valid_registration(runti
             x_openviking_user="bob",
         )
 
-    long_user_id = "u" * 1024
-    await plugin.resolve_identity(
-        request, api_key="root", x_openviking_account="acme", x_openviking_user=long_user_id
-    )
+    long_user_id = "u" * 256
+    with pytest.raises(InvalidArgumentError, match="user_id.*255"):
+        await plugin.resolve_identity(
+            request, api_key="root", x_openviking_account="acme", x_openviking_user=long_user_id
+        )
     await plugin.flush_trusted_identities()
 
     assert await runtime.get_registered_user_role(account_id, "alice") == Role.USER
-    assert await runtime.get_registered_user_role("acme", long_user_id) == Role.USER
+    assert await runtime.get_registered_user_role("acme", long_user_id) is None
 
 
 async def test_trusted_registration_preserves_existing_oversized_account():

@@ -64,6 +64,28 @@ const overview = {
       action: 'Open setup guides',
     },
   },
+  quick: {
+    title: 'Quick mode',
+    description:
+      'Skip the steps below and get a gateway key that works right away.',
+    upstreamImport:
+      "Upstream: import the OpenViking server's model settings, reusing its API key and quota",
+    upstreamUse: 'Upstream: use {{names}} ({{models}}, {{protocol}})',
+    profileCreate:
+      'Context profile: create “{{name}}” with the recommended settings',
+    profileUse: 'Context profile: use “{{name}}”',
+    keySelf: 'Key: issued for {{user}}',
+    keyPick: 'Key: choose the OpenViking user who owns it in the next step',
+    action: 'Get a key',
+    running: 'Generating…',
+    retry: 'Try again',
+    locked:
+      'Creating a context profile or importing models needs the gateway management key.',
+    noUsable:
+      "OpenViking's model settings have no model the gateway can relay directly. Fix the issues listed below, or add an upstream yourself in step 1.",
+    keyName: 'Quick mode',
+    divider: 'Or set up step by step',
+  },
   kpi: {
     requests: {
       label: 'Requests',

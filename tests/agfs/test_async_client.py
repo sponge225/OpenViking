@@ -6,15 +6,8 @@ import threading
 
 import pytest
 
-from openviking.pyagfs import AsyncAGFSClient, RAGFSBindingClient
+from openviking.pyagfs import AsyncAGFSClient
 from openviking.storage.viking_vector_index_backend import _AsyncVectorAdapter
-
-
-def test_removed_sync_methods_are_not_exposed():
-    """Removed sync methods must stay absent from Python and native clients."""
-    for client_type in (AsyncAGFSClient, RAGFSBindingClient):
-        assert not hasattr(client_type, "system_sync_status")
-        assert not hasattr(client_type, "system_sync_retry")
 
 
 @pytest.mark.asyncio

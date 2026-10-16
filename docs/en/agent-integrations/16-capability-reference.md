@@ -24,7 +24,7 @@ Long-term memories are extracted from a session only after a **commit**. Capture
 
 ### Agent-callable tools
 
-"Server MCP tools" means whatever the server's `tools/list` returns: 20 tools on the current server, listed in [Server MCP tools](#server-mcp-tools).
+"Server MCP tools" means whatever the server's `tools/list` returns: 21 tools on the current server, listed in [Server MCP tools](#server-mcp-tools).
 
 | Integration | How it connects | Tools the agent can call |
 |---|---|---|
@@ -82,7 +82,7 @@ Every MCP-based integration exposes the same server-defined tools and keeps no c
 
 | Group | Tools |
 |---|---|
-| Search and browse | `find`, `search`, `read`, `list`, `tree`, `grep`, `glob` |
+| Search and browse | `find`, `search`, `read`, `download`, `list`, `tree`, `grep`, `glob` |
 | Write | `remember`, `write`, `edit`, `add_resource`, `add_skill` |
 | Delete | `forget` |
 | Watched resources | `list_watches`, `cancel_watch` (not yet available on the commercial edition) |

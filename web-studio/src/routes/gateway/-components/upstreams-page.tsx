@@ -317,7 +317,7 @@ export function UpstreamsPage() {
 }
 
 /** What an import of OpenViking's model settings saved, and what needs a look. */
-function ImportResultNotice({
+export function ImportResultNotice({
   result,
   onDismiss,
 }: {

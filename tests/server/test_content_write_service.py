@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from openviking.server.identity import RequestContext, Role
+from openviking.service.task_work_index import bind_task_context
 from openviking.session.memory.dataclass import MemoryFile
 from openviking.session.memory.utils import MemoryFileUtils
 from openviking.session.memory.utils.content_visibility import visible_content
@@ -20,6 +21,21 @@ from openviking_cli.exceptions import (
     PermissionDeniedError,
 )
 from openviking_cli.session.user_id import UserIdentifier
+
+
+@pytest.fixture(autouse=True)
+def run_direct_coordinator_operations_inline(request, monkeypatch):
+    if "service" in request.fixturenames:
+        return
+
+    async def run_tracked_operation(_task_type, *, operation, **_kwargs):
+        with bind_task_context("test-task", "default", "test-user", enqueued_work=[]):
+            return await operation(), "test-task"
+
+    monkeypatch.setattr(
+        "openviking.storage.content_write.run_tracked_operation",
+        run_tracked_operation,
+    )
 
 
 @pytest.mark.asyncio
@@ -704,8 +720,8 @@ async def test_memory_write_wait_skips_semantic_queue_and_releases_write_lock(mo
         del uri, content, mode, ctx, lock_handle, lease_ref
         return b"updated"
 
-    async def _fail_wait_for_request(*, telemetry_id, timeout):
-        del telemetry_id, timeout
+    async def _fail_wait_for_request(*, telemetry_id):
+        del telemetry_id
         raise AssertionError("memory write should not wait for semantic refresh")
 
     async def _fake_refresh_schema_overview(**kwargs):
@@ -826,12 +842,7 @@ async def test_create_mode_new_file_success(monkeypatch):
         write_calls.append((uri, content, mode, is_new_file))
         return content
 
-    async def _fake_wait_for_queues(*, timeout):
-        del timeout
-        return None
-
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
-    monkeypatch.setattr(coordinator, "_wait_for_queues", _fake_wait_for_queues)
 
     result = await coordinator.write(
         uri=file_uri, content="new content", mode="create", ctx=ctx, wait=True
@@ -867,12 +878,7 @@ async def test_create_mode_refreshes_canonical_user_memory_uri(monkeypatch):
         refresh_calls.append(kwargs)
         return None
 
-    async def _fake_wait_for_queues(*, timeout):
-        del timeout
-        return None
-
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
-    monkeypatch.setattr(coordinator, "_wait_for_queues", _fake_wait_for_queues)
     monkeypatch.setattr(
         "openviking.storage.content_write.MemoryUpdater.refresh_schema_overview",
         _fake_refresh_schema_overview,
@@ -940,12 +946,7 @@ async def test_create_mode_invalid_extension_raises_400(monkeypatch):
         del uri, content, mode, ctx, lock_handle, lease_ref
         return None
 
-    async def _fake_wait_for_queues(*, timeout):
-        del timeout
-        return None
-
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
-    monkeypatch.setattr(coordinator, "_wait_for_queues", _fake_wait_for_queues)
 
     with pytest.raises(InvalidArgumentError):
         await coordinator.write(uri=file_uri, content="content", mode="create", ctx=ctx, wait=True)
@@ -968,12 +969,7 @@ async def test_create_mode_parent_dirs_auto_created(monkeypatch):
         write_calls.append((uri, content, mode, is_new_file))
         return content
 
-    async def _fake_wait_for_queues(*, timeout):
-        del timeout
-        return None
-
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
-    monkeypatch.setattr(coordinator, "_wait_for_queues", _fake_wait_for_queues)
 
     result = await coordinator.write(
         uri=file_uri, content="nested content", mode="create", ctx=ctx, wait=True
@@ -1002,12 +998,11 @@ async def test_create_mode_valid_extensions_pass(monkeypatch):
             del uri, mode, ctx, lock_handle, lease_ref, is_new_file
             return content
 
-        async def _fake_wait_for_queues(*, timeout):
-            del timeout
+        async def _fake_wait_for_queues(**_kwargs):
             return None
 
         monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
-        monkeypatch.setattr(coordinator, "_wait_for_queues", _fake_wait_for_queues)
+        monkeypatch.setattr(coordinator, "_wait_for_request", _fake_wait_for_queues)
 
         result = await coordinator.write(
             uri=file_uri, content="content", mode="create", ctx=ctx, wait=True
@@ -1035,12 +1030,7 @@ async def test_create_mode_memory_scope(monkeypatch):
         refresh_calls.append(kwargs)
         return None
 
-    async def _fake_wait_for_queues(*, timeout):
-        del timeout
-        return None
-
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
-    monkeypatch.setattr(coordinator, "_wait_for_queues", _fake_wait_for_queues)
     monkeypatch.setattr(
         "openviking.storage.content_write.MemoryUpdater.refresh_schema_overview",
         _fake_refresh_schema_overview,
@@ -1116,12 +1106,7 @@ async def test_create_mode_regression_replace_unchanged(monkeypatch):
         del uri, content, ctx, lock_handle, lease_ref
         return b"updated"
 
-    async def _fake_wait_for_queues(*, timeout):
-        del timeout
-        return None
-
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
-    monkeypatch.setattr(coordinator, "_wait_for_queues", _fake_wait_for_queues)
 
     result = await coordinator.write(
         uri=file_uri, content="updated", ctx=ctx, mode="replace", wait=True
@@ -1144,12 +1129,7 @@ async def test_create_mode_regression_append_unchanged(monkeypatch):
         del uri, content, ctx, lock_handle, lease_ref
         return b"previousappended"
 
-    async def _fake_wait_for_queues(*, timeout):
-        del timeout
-        return None
-
     monkeypatch.setattr(coordinator, "_write_in_place", _fake_write_in_place)
-    monkeypatch.setattr(coordinator, "_wait_for_queues", _fake_wait_for_queues)
 
     result = await coordinator.write(
         uri=file_uri, content="appended", ctx=ctx, mode="append", wait=True

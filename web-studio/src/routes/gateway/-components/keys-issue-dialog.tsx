@@ -145,6 +145,8 @@ type KeysIssueDialogProps = {
   upstreams: Upstream[]
   /** Receives the new key, whose secret is only available now. */
   onIssued: (issued: IssuedKey) => void
+  /** Initial name, profile, upstreams and models instead of an empty form. */
+  defaults?: Partial<Omit<KeyRequest, keyof KeyOwner>>
 }
 
 /**
@@ -159,6 +161,7 @@ export function KeysIssueDialog({
   profiles,
   upstreams,
   onIssued,
+  defaults,
 }: KeysIssueDialogProps) {
   const { t } = useTranslation('gateway')
   const {
@@ -181,6 +184,7 @@ export function KeysIssueDialog({
     policy_id: profiles.length === 1 ? profiles[0].id : '',
     upstream_ids: upstreams.length === 1 ? [upstreams[0].id] : [],
     models: [],
+    ...defaults,
   }))
   /** 'key' once the admin switches to pasting, or the server asks for it. */
   const [chosenMode, setChosenMode] = React.useState<'user' | 'key'>('user')
