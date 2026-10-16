@@ -128,9 +128,44 @@ impl LocalFileSystem {
         let canonical = fs::canonicalize(&path)
             .map_err(|e| Error::plugin(format!("failed to canonicalize base path: {}", e)))?;
 
+        #[cfg(target_os = "linux")]
+        Self::verify_proc_fd_support(&canonical)?;
+
         Ok(Self {
             base_path: canonical,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verify_proc_fd_support(path: &Path) -> Result<()> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::invalid_path(path.to_string_lossy()))?;
+        // SAFETY: `path` is a valid NUL-terminated string. The returned fd is
+        // immediately owned by `File` so it is closed on every return path.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(Error::plugin(format!(
+                "failed to inspect localfs base path: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: `fd` was just returned by `open` and has no other owner.
+        let file = unsafe { fs::File::from_raw_fd(fd) };
+        fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).map_err(|e| {
+            Error::plugin(format!(
+                "localfs requires accessible /proc/self/fd on Linux: {}",
+                e
+            ))
+        })?;
+        Ok(())
     }
 
     /// Resolve a virtual path to actual local path
@@ -262,22 +297,27 @@ impl LocalFileSystem {
         }
         // SAFETY: `fd` was just returned by `open` and has no other owner.
         let file = unsafe { fs::File::from_raw_fd(fd) };
-        match fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())) {
-            Ok(actual_path) => Ok(actual_path.file_name().is_some_and(|actual| actual == name)),
-            Err(_) => Self::directory_contains_exact_name(path, name),
-        }
+        let actual_path = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .map_err(|e| Error::plugin(format!("failed to inspect path entry: {}", e)))?;
+        Ok(actual_path.file_name().is_some_and(|actual| actual == name))
     }
 
     #[cfg(windows)]
     fn path_has_exact_name(path: &Path, name: &OsStr) -> Result<bool> {
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use std::os::windows::ffi::OsStrExt;
         use std::os::windows::io::{AsRawHandle, FromRawHandle};
         use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileW, GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS,
+            CreateFileW, FileNameInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
             FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
             OPEN_EXISTING,
         };
+
+        #[repr(C)]
+        struct FileNameInfoBuffer {
+            length: u32,
+            name: [u16; 32_768],
+        }
 
         let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().collect();
         path_wide.push(0);
@@ -302,24 +342,34 @@ impl LocalFileSystem {
         }
         // SAFETY: `handle` was just returned by `CreateFileW` and has no other owner.
         let file = unsafe { fs::File::from_raw_handle(handle) };
-        let mut buffer = vec![0_u16; 32_768];
-        // SAFETY: `file` owns a valid handle and `buffer` is writable for its full length.
-        let length = unsafe {
-            GetFinalPathNameByHandleW(
+        let mut info = Box::new(FileNameInfoBuffer {
+            length: 0,
+            name: [0; 32_768],
+        });
+        // SAFETY: `file` owns a valid handle and `info` is writable for its full length.
+        let succeeded = unsafe {
+            GetFileInformationByHandleEx(
                 file.as_raw_handle() as HANDLE,
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
-                0,
+                FileNameInfo,
+                (&mut *info as *mut FileNameInfoBuffer).cast(),
+                std::mem::size_of::<FileNameInfoBuffer>() as u32,
             )
-        } as usize;
-        if length == 0 || length >= buffer.len() {
+        };
+        if succeeded == 0 {
             return Err(Error::plugin(format!(
                 "failed to inspect path entry: {}",
                 io::Error::last_os_error()
             )));
         }
-        let actual_path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length]));
-        Ok(actual_path.file_name().is_some_and(|actual| actual == name))
+        let length = info.length as usize;
+        if length % 2 != 0 || length > info.name.len() * std::mem::size_of::<u16>() {
+            return Err(Error::plugin("invalid path entry name length"));
+        }
+        let actual_name = info.name[..length / 2]
+            .rsplit(|character| *character == b'\\' as u16 || *character == b'/' as u16)
+            .next()
+            .unwrap_or_default();
+        Ok(actual_name.iter().copied().eq(name.encode_wide()))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
@@ -327,7 +377,7 @@ impl LocalFileSystem {
         Self::directory_contains_exact_name(path, name)
     }
 
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     fn directory_contains_exact_name(path: &Path, name: &OsStr) -> Result<bool> {
         let parent = path
             .parent()
@@ -1467,39 +1517,75 @@ mod tests {
     #[tokio::test]
     async fn test_localfs_case_aliases_follow_filesystem_semantics() {
         let (dir, fs) = localfs();
-        write_file(dir.path(), "a.md", "owner-a");
-        let case_insensitive = dir.path().join("A.md").exists();
+        write_file(dir.path(), "folder/a.md", "owner-a");
+        let directory_case_insensitive = dir.path().join("Folder").exists();
+        let file_case_insensitive = dir.path().join("folder/A.md").exists();
 
-        if case_insensitive {
+        if directory_case_insensitive {
             assert!(matches!(
-                fs.read("/A.md", 0, 0).await,
-                Err(Error::InvalidPath(_))
-            ));
-            assert!(matches!(
-                fs.write("/A.md", b"owner-b", 0, WriteFlag::Create).await,
+                fs.read("/Folder/a.md", 0, 0).await,
                 Err(Error::InvalidPath(_))
             ));
         } else {
             assert!(matches!(
-                fs.read("/A.md", 0, 0).await,
+                fs.read("/Folder/a.md", 0, 0).await,
                 Err(Error::NotFound(_))
             ));
-            fs.write("/A.md", b"owner-b", 0, WriteFlag::Create)
+        }
+
+        if file_case_insensitive {
+            assert!(matches!(
+                fs.read("/folder/A.md", 0, 0).await,
+                Err(Error::InvalidPath(_))
+            ));
+            assert!(matches!(
+                fs.write("/folder/A.md", b"owner-b", 0, WriteFlag::Create)
+                    .await,
+                Err(Error::InvalidPath(_))
+            ));
+        } else {
+            assert!(matches!(
+                fs.read("/folder/A.md", 0, 0).await,
+                Err(Error::NotFound(_))
+            ));
+            fs.write("/folder/A.md", b"owner-b", 0, WriteFlag::Create)
                 .await
                 .unwrap();
             assert_eq!(
-                std::fs::read_to_string(dir.path().join("A.md")).unwrap(),
+                std::fs::read_to_string(dir.path().join("folder/A.md")).unwrap(),
                 "owner-b"
             );
         }
 
-        fs.write("/a.md", b"updated", 0, WriteFlag::Create)
+        fs.write("/folder/a.md", b"updated", 0, WriteFlag::Create)
             .await
             .unwrap();
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+            std::fs::read_to_string(dir.path().join("folder/a.md")).unwrap(),
             "updated"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_localfs_reads_exact_path_in_non_listable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, fs) = localfs();
+        write_file(dir.path(), "blocked/a.md", "exact");
+        let blocked = dir.path().join("blocked");
+        let original_mode = std::fs::metadata(&blocked).unwrap().permissions().mode();
+        let mut permissions = std::fs::metadata(&blocked).unwrap().permissions();
+        permissions.set_mode(0o111);
+        std::fs::set_permissions(&blocked, permissions).unwrap();
+
+        let result = fs.read("/blocked/a.md", 0, 0).await;
+
+        let mut permissions = std::fs::metadata(&blocked).unwrap().permissions();
+        permissions.set_mode(original_mode);
+        std::fs::set_permissions(&blocked, permissions).unwrap();
+
+        assert_eq!(result.unwrap(), b"exact");
     }
 
     #[test]
