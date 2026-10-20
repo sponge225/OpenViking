@@ -61,7 +61,7 @@ openviking-server --config /path/to/ov.conf
 | `glob` | object | 内置默认值 | 路径模式匹配引擎配置 |
 | `storage` | object | 本地存储 | 工作目录、文件系统和向量数据库 |
 | `queue_workers` | object | 见下表 | QueueFS 消费 worker 的运行时并发配置 |
-| `server` | object | 本地开发模式 | HTTP 服务、鉴权、上传和可观测性 |
+| `server` | object | 本地部署 | HTTP 服务、鉴权、上传和可观测性 |
 | `memory` | object | 见下表 | 会话提交后的记忆与技能抽取 |
 | `parsers` | object | 各解析器默认值 | PDF、代码、图片、音视频等解析行为 |
 | `semantic` | object | 内置默认值 | abstract 和 overview 的生成限制 |
@@ -353,9 +353,10 @@ Provider 和密钥管理配置见[加密指南](../guides/08-encryption.md)。
 
 | 值 | 使用场景 |
 |---|---|
-| `dev` | 仅监听本机地址的开发环境，不要求 API Key |
 | `api_key` | 服务端校验 root/user/admin key |
 | `trusted` | 由受信任网关注入 account/user 身份 |
+
+两种模式都要求配置非空 `root_api_key`，包括 localhost。省略 `auth_mode` 时，服务端选择 `api_key`。
 
 ## 记忆配置
 

@@ -1,8 +1,8 @@
 # Authentication
 
-OpenViking Server supports multiple built-in authentication modes with role-based access control. The mode is auto-detected if not explicitly configured. In addition, custom authentication plugins can be registered to support arbitrary identity sources.
+OpenViking Server supports multiple built-in authentication modes with role-based access control. If the mode is not explicitly configured, the server selects API Key mode. In addition, custom authentication plugins can be registered to support arbitrary identity sources.
 
-API Key mode is recommended for most deployments; it is auto-selected when no mode is specified and a nonempty root key is configured. Use API Key mode when OpenViking should manage credentials, OIDC or LDAP for an existing identity service, and Trusted mode behind a gateway that validates callers.
+API Key mode is recommended for most deployments. Use API Key mode when OpenViking should manage credentials, OIDC or LDAP for an existing identity service, and Trusted mode behind a gateway that validates callers. API Key and Trusted modes both require a nonempty `root_api_key`, including on localhost.
 
 ## Authentication Modes Overview
 
@@ -12,13 +12,10 @@ API Key mode is recommended for most deployments; it is auto-selected when no mo
 | **OIDC Mode** | `oidc` | JWT tokens from external identity providers | Enterprise SSO integration with Okta/Auth0/Keycloak |
 | **LDAP Mode** | `ldap` | Enterprise LDAP/AD directory services | Integrate with existing enterprise user directory |
 | **Trusted Mode** | `trusted` | `X-OpenViking-Account` / `X-OpenViking-User`, plus `root_api_key` on every deployment. Role is looked up from APIKeyManager if the user exists. | Behind a trusted gateway or internal network boundary |
-| **Dev Mode** | `dev` | No authentication, always ROOT | Local development only |
 
-If `auth_mode` is not explicitly configured:
-- If `root_api_key` is set (non-empty): auto-selects `api_key` mode
-- If `root_api_key` is not set: auto-selects `dev` mode
+If `auth_mode` is not explicitly configured, the server selects `api_key`. It refuses to start without a nonempty `root_api_key`; it never falls back to unauthenticated access.
 
-> **Note:** Setting `root_api_key` to an empty string `""` is invalid. Either set a non-empty value or remove the setting entirely.
+> **Note:** A missing `root_api_key` and an empty string `""` are both invalid. Configure a nonempty value before starting the server.
 
 ## Quick Start: API Key Mode (Recommended)
 

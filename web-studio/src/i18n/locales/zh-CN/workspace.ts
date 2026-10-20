@@ -1371,7 +1371,6 @@ const workspace = {
     serverMode: {
       api_key: 'API 密钥模式',
       checking: '检查中...',
-      dev: '开发模式',
       ldap: 'LDAP 模式',
       offline: '离线',
       oidc: 'OIDC 模式',

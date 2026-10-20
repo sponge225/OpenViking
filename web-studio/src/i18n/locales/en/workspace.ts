@@ -1437,7 +1437,6 @@ const workspace = {
     serverMode: {
       api_key: 'API key mode',
       checking: 'Checking...',
-      dev: 'Development mode',
       ldap: 'LDAP mode',
       offline: 'Offline',
       oidc: 'OIDC mode',

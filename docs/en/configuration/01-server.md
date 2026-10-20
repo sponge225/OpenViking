@@ -61,7 +61,7 @@ Optional sections use their defaults when omitted. Unknown fields in `ov.conf` a
 | `glob` | object | built-in defaults | Path glob engine |
 | `storage` | object | local | Workspace, file system, and vector database |
 | `queue_workers` | object | see below | Runtime concurrency for QueueFS consumer workers |
-| `server` | object | local development | HTTP, authentication, uploads, and observability |
+| `server` | object | local deployment | HTTP, authentication, uploads, and observability |
 | `memory` | object | see below | Memory and skill extraction on session commit |
 | `parsers` | object | parser defaults | PDF, code, image, audio, video, and text parsing |
 | `semantic` | object | built-in defaults | Abstract and overview generation limits |
@@ -354,9 +354,10 @@ See [Encryption](../guides/08-encryption.md) for provider and key-management set
 
 | Value | Use case |
 |---|---|
-| `dev` | Local-only development without API keys |
 | `api_key` | Validate root/user/admin keys |
 | `trusted` | Trust an upstream gateway to inject account/user identity |
+
+Both modes require a nonempty `root_api_key`, including on localhost. If `auth_mode` is omitted, the server selects `api_key`.
 
 ## Memory Settings
 
