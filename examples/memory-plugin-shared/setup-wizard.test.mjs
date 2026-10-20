@@ -50,6 +50,25 @@ test("a missing config file is created at the candidate path", async () => {
   }
 });
 
+test("a missing API key is rejected until a non-empty key is entered", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ov-wizard-key-required-"));
+  const target = join(dir, "ovcli.conf");
+  try {
+    const io = scriptedIo(["1", "", "sk-required", "y"]);
+    const result = await runSetupWizard({
+      input: io.input,
+      output: io.output,
+      env: { OPENVIKING_CLI_CONFIG_FILE: target },
+    });
+
+    assert.equal(result.written, true);
+    assert.match(io.transcript(), /API key is required/);
+    assert.equal(JSON.parse(await readFile(target, "utf-8")).api_key, "sk-required");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("an existing config file keeps unknown fields and its secret", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ov-wizard-existing-"));
   const target = join(dir, "ovcli.conf");

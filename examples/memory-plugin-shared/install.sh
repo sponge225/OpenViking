@@ -21,8 +21,8 @@
 #   curl -fsSL https://openviking.ai/install | bash -s -- --yes --url <server-url> --api-key <api-key>
 # (https://openviking.ai/install is a short script that downloads this one and
 # runs it; https://openviking.net/install serves the same.)
-# The server URL and API key come from the user; without them it uses an
-# existing ~/.openviking/ovcli.conf, then http://127.0.0.1:1933 without a key.
+# The server URL and API key come from the user or an existing
+# ~/.openviking/ovcli.conf. The installer never writes a keyless connection.
 # It installs into the agents it detects (claude,codex when it detects none)
 # and installs the CLI; --harness claude,codex,cli picks them, and --help lists
 # every option and environment variable.
@@ -236,7 +236,7 @@ Options:
                      Default: dev when run from a repository checkout, archive otherwise.
   --dist CHANNEL     Ignored; kept so older commands keep working.
   --url URL          OpenViking server base URL.
-  --api-key KEY      OpenViking API key. Pass '' for unauthenticated local mode.
+  --api-key KEY      Required OpenViking API key.
   --account ID       Optional OpenViking account.
   --user ID          Optional OpenViking user.
   --statusline       Register the Claude Code statusline without asking.
@@ -1333,28 +1333,27 @@ prompt_connection() { # sets WIZ_URL / WIZ_KEY (WIZ_KEY may stay __OPENVIKING_KE
   esac
 
   hidden="$(t 'typing is not shown' '输入内容不会显示')"
-  if [ -n "$current_key" ]; then
-    ask "$(t "API key [Enter = keep $(mask_secret "$current_key"), '-' = clear; $hidden]: " "API key [回车 = 保留 $(mask_secret "$current_key")，输入 '-' 清空；$hidden]: ")"
-  elif [ "$TUI_MENU_CHOICE" -eq 1 ]; then
-    info "$(t 'Get an API key in the OpenViking console, under User Management → API Key:' '在 OpenViking 控制台的「用户管理 → API Key」获取密钥：')"
-    info "  https://console.volcengine.com/vikingdb/openviking/region:openviking+cn-beijing"
-    ask "$(t "API key ($hidden): " "API key（$hidden）: ")"
-  else
-    ask "$(t "API key (press Enter if the server needs none; $hidden): " "API key（服务未开启鉴权可直接回车；$hidden）: ")"
-  fi
-  read_tty reply -s
-  if [ "$reply" = "-" ]; then
-    WIZ_KEY=""
-  elif [ -n "$reply" ]; then
-    WIZ_KEY="$reply"
-  else
-    # Not `[ -z ... ] && ...`: as the function's last command a false test makes
-    # prompt_connection return 1, and `set -e` aborts the whole installer.
-    WIZ_KEY="__OPENVIKING_KEEP__"
-    if [ -z "$current_key" ]; then
-      WIZ_KEY=""
+  while :; do
+    if [ -n "$current_key" ]; then
+      ask "$(t "API key [Enter = keep $(mask_secret "$current_key"); $hidden]: " "API key [回车 = 保留 $(mask_secret "$current_key")；$hidden]: ")"
+    elif [ "$TUI_MENU_CHOICE" -eq 1 ]; then
+      info "$(t 'Get an API key in the OpenViking console, under User Management → API Key:' '在 OpenViking 控制台的「用户管理 → API Key」获取密钥：')"
+      info "  https://console.volcengine.com/vikingdb/openviking/region:openviking+cn-beijing"
+      ask "$(t "API key ($hidden): " "API key（$hidden）: ")"
+    else
+      ask "$(t "API key (required; $hidden): " "API key（必填；$hidden）: ")"
     fi
-  fi
+    read_tty reply -s
+    if [ -n "$reply" ]; then
+      WIZ_KEY="$reply"
+      break
+    fi
+    if [ -n "$current_key" ]; then
+      WIZ_KEY="__OPENVIKING_KEEP__"
+      break
+    fi
+    warn "$(t 'API key is required.' 'API key 为必填项。')"
+  done
 }
 
 # What the credentials step settled on. Nothing is written until the plan is
@@ -1382,7 +1381,7 @@ gather_credentials() {
   [ "$USER_ARG" = "__OPENVIKING_UNSET__" ] || CRED_USER="$USER_ARG"
 
   # Show what is configured today, then offer to keep or reconfigure.
-  if [ -n "$CUR_URL" ] || [ -n "$CUR_KEY" ]; then
+  if [ -n "$CUR_KEY" ]; then
     info "$(t 'Current config:' '当前配置：')"
     info "  url:     ${CUR_URL:-$(t '(not set)' '（未设置）')}"
     info "  api_key: $(mask_secret "$CUR_KEY")"
@@ -1393,7 +1392,7 @@ gather_credentials() {
   fi
 
   if [ "$INTERACTIVE" -eq 1 ] && [ -z "$URL_ARG" ] && [ "$API_KEY_ARG" = "__OPENVIKING_UNSET__" ]; then
-    if [ -n "$CUR_URL" ] || [ -n "$CUR_KEY" ]; then
+    if [ -n "$CUR_KEY" ]; then
       tui_menu "$(t 'Existing credentials found — what next?' '检测到已有凭据——如何处理？')" 0 \
         "$(t 'Keep current credentials' '沿用当前凭据')" \
         "$(t 'Reconfigure (server URL / API key)' '重新配置（服务地址 / API key）')"
@@ -1408,6 +1407,11 @@ gather_credentials() {
   fi
   if [ -z "$CRED_URL" ]; then
     CRED_URL="http://127.0.0.1:1933"
+  fi
+  if [ -z "$(cred_value "$CRED_KEY" "$CUR_KEY")" ]; then
+    err "$(t 'An OpenViking API key is required. Re-run with:' '必须提供 OpenViking API key。请使用以下参数重新运行：')"
+    err "  $INSTALL_COMMAND --yes --url <server-url> --api-key <api-key>"
+    exit 2
   fi
 }
 
@@ -3239,21 +3243,6 @@ warn_other_cli() {
   warn "$(t "Another ov is already installed at $found. After the install there will be two, and PATH decides which one runs." "已有另一个 ov：${found}。安装后会有两个 ov，实际运行哪个取决于 PATH 顺序。")"
 }
 
-# Without a tty nobody saw the connection menu, so a run that got no server
-# says loudly what it assumed and how to fix it.
-warn_default_connection() {
-  [ "$INTERACTIVE" -eq 0 ] && [ -z "$URL_ARG" ] && [ "$API_KEY_ARG" = "__OPENVIKING_UNSET__" ] \
-    && [ -z "$CUR_URL" ] && [ -z "$CUR_KEY" ] || return 0
-  local bins=""
-  [ -z "$CLAUDE_BINS_ARG" ] || bins="$bins --claude-bin $CLAUDE_BINS_ARG"
-  [ -z "$CODEX_BINS_ARG" ] || bins="$bins --codex-bin $CODEX_BINS_ARG"
-  printf '\n'
-  warn "${BOLD}$(t 'No server was given: the plugin is configured for http://127.0.0.1:1933 without an API key.' '未指定服务：插件将连接 http://127.0.0.1:1933，且不带 API key。')${RESET}"
-  warn "$(t 'To use another server, re-run with its URL and API key:' '如需连接其他服务，请带上服务地址和 API key 重新运行：')"
-  printf '      %s --yes --harness %s%s --url <server-url> --api-key <api-key>\n\n' \
-    "$INSTALL_COMMAND" "${PUBLIC_SELECTED_HARNESSES:-$SELECTED_HARNESSES}" "$bins"
-}
-
 confirm_plan() {
   TUI_MENU_QUIT=1 tui_menu "$(t 'Proceed with the install?' '开始安装？')" 0 "$(t 'Proceed' '继续')" "$(t 'Cancel' '取消')"
   if [ "$TUI_MENU_CHOICE" -ne 0 ]; then
@@ -3380,7 +3369,6 @@ choose_statusline
 choose_cli_prefix
 print_plan
 warn_other_cli
-warn_default_connection
 # Nothing under $OV_HOME or in any harness config is written before this point.
 confirm_plan
 resolve_release

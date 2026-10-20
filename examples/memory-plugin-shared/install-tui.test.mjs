@@ -326,17 +326,18 @@ write_ovcli
   assert.doesNotMatch(calls, /secret-api-key/);
 });
 
-test("a first-time setup offers the local server first", () => {
+test("a first-time local setup requires an API key", () => {
   const result = runInstallerPrelude(`
 tui_menu() { TUI_MENU_CHOICE="$2"; }
 INTERACTIVE=1
-exec 3< <(printf '\\n')
+exec 3< <(printf '\\nlocal-key\\n')
 prompt_connection "" ""
 printf '%s|%s\\n' "$WIZ_URL" "$WIZ_KEY"
 `);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim().split("\n").pop(), "http://127.0.0.1:1933|");
+  assert.match(result.stdout, /API key is required/);
+  assert.equal(result.stdout.trim().split("\n").pop(), "http://127.0.0.1:1933|local-key");
 });
 
 test("without a terminal, the language follows --lang, OPENVIKING_LANG, the locale, then the macOS setting", (t) => {
@@ -526,7 +527,7 @@ tui_menu() {
 }
 ${mainMarker}`));
 
-  const result = run(["--harness", "cursor", "--url", "http://127.0.0.1:9", "--api-key", ""]);
+  const result = run(["--harness", "cursor", "--url", "http://127.0.0.1:9", "--api-key", "test-key"]);
 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /^menu: Language \/ 语言\n/);
@@ -548,7 +549,7 @@ tui_menu() {
 ${mainMarker}`));
     writeFileSync(join(home, "bin", "claude"), '#!/bin/sh\n[ "$1" != --version ] || echo "2.1.224 (Claude Code)"\n', { mode: 0o755 });
 
-    const result = run(["--harness", "claude", "--lang", "en", "--url", "http://127.0.0.1:9", "--api-key", ""]);
+    const result = run(["--harness", "claude", "--lang", "en", "--url", "http://127.0.0.1:9", "--api-key", "test-key"]);
 
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const asked = result.stdout.indexOf("menu: Enable the OpenViking statusline?");
@@ -558,22 +559,25 @@ ${mainMarker}`));
   }
 });
 
-test("a non-interactive run with no server says so and how to re-run", (t) => {
+test("a non-interactive run without an API key fails before writing config", (t) => {
   const { home, run } = detachedInstaller(t);
-  const notice = /No server was given: the plugin is configured for http:\/\/127\.0\.0\.1:1933 without an API key\./;
 
   const result = run(["--harness", "dsh", "--lang", "en", "--yes"]);
 
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stdout, notice);
-  assert.ok(result.stdout.indexOf("Review") < result.stdout.search(notice));
-  assert.match(result.stdout, /curl -fsSL https:\/\/openviking\.ai\/install \| bash -s -- --yes --harness dsh --url <server-url> --api-key <api-key>/);
-  assert.match(result.stdout, /\[4\/4\] Validation/);
-  assert.match(result.stdout, /DeepSeek Harness\n {4}Next: .*\n {4}Updates: re-run this installer\n {4}Uninstall: dsh plugin --profile web rm @openviking\/dsh-memory-plugin/);
-  assert.equal(JSON.parse(readFileSync(join(home, ".openviking", "ovcli.conf"), "utf8")).url, "http://127.0.0.1:1933");
+  assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /An OpenViking API key is required/);
+  assert.match(result.stderr, /--url <server-url> --api-key <api-key>/);
+  assert.equal(existsSync(join(home, ".openviking", "ovcli.conf")), false);
+});
 
-  // Once a server is configured, a re-run has nothing to warn about.
-  const again = run(["--harness", "dsh", "--lang", "en", "--yes"]);
-  assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
-  assert.doesNotMatch(again.stdout, notice);
+test("an explicitly empty API key is rejected", (t) => {
+  const { home, run } = detachedInstaller(t);
+  const result = run([
+    "--harness", "dsh", "--lang", "en", "--yes",
+    "--url", "http://127.0.0.1:1933", "--api-key", "",
+  ]);
+
+  assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /An OpenViking API key is required/);
+  assert.equal(existsSync(join(home, ".openviking", "ovcli.conf")), false);
 });

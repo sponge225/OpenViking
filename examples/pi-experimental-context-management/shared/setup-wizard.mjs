@@ -74,14 +74,17 @@ export async function runSetupWizard({
       if (answer) url = answer;
     }
 
-    const keyPrompt = current.api_key
-      ? `API key [enter = keep ${maskSecret(current.api_key)}, '-' = clear]: `
-      : "API key (leave empty for unauthenticated local mode): ";
-    const keyAnswer = await rl.question(keyPrompt);
     let apiKey = current.api_key || "";
-    if (keyAnswer === "-") apiKey = "";
-    else if (keyAnswer.trim()) apiKey = keyAnswer.trim();
-    else if (!current.api_key) apiKey = "";
+    while (true) {
+      const keyPrompt = current.api_key
+        ? `API key [enter = keep ${maskSecret(current.api_key)}]: `
+        : "API key (required): ";
+      const keyAnswer = await rl.question(keyPrompt);
+      if (keyAnswer.trim()) apiKey = keyAnswer.trim();
+      else if (current.api_key) apiKey = current.api_key;
+      if (apiKey) break;
+      say("API key is required.");
+    }
 
     const next = { ...current, url, api_key: apiKey };
 
