@@ -264,6 +264,12 @@ OpenViking in order. The active profile records each copied entry's exact URI in
 | `replace` | Match the committed event's full previous content and target, update the same URI, and wait for semantic/vector refresh |
 | `remove` | Match the committed event's full previous content and target, delete that exact URI, and wait for semantic cleanup |
 
+Hermes v0.22 and later expose `patch` instead of `replace` in the native
+`memory` tool. After a successful patch, Hermes sends the provider a `replace`
+event containing the complete updated entry and its full previous content.
+Older Hermes releases expose `replace` directly. Both paths update the same
+mapped OpenViking URI.
+
 Replacing a mapped entry recreates its file if it was deleted directly in
 OpenViking, for example with `viking_forget`.
 
