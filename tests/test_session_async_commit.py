@@ -10,11 +10,11 @@ import httpx
 import pytest_asyncio
 
 from openviking.server.app import create_app
-from openviking.server.auth.plugins import DevAuthPlugin
 from openviking.server.config import ServerConfig
 from openviking.server.dependencies import set_service
 from openviking.service.core import OpenVikingService
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
+from tests.server.auth_test_utils import FixedIdentityAuthPlugin
 
 
 @pytest_asyncio.fixture
@@ -24,7 +24,7 @@ async def api_client(
     """Create in-process HTTP client for API endpoint tests."""
     app = create_app(config=ServerConfig(), service=service)
     set_service(service)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:

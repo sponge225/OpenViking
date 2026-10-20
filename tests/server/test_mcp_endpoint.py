@@ -21,9 +21,8 @@ from starlette.routing import Route
 
 import openviking.server.mcp_endpoint as mcp_endpoint
 from openviking.privacy.reference import build_privacy_field_reference
-from openviking.server.auth.plugins import DevAuthPlugin
 from openviking.server.dependencies import set_service
-from openviking.server.identity import AuthMode, RequestContext, Role
+from openviking.server.identity import RequestContext, Role
 from openviking.server.mcp_endpoint import (
     StoreMessage,
     _get_ctx,
@@ -57,6 +56,7 @@ from openviking_cli.exceptions import (
     UnauthenticatedError,
 )
 from openviking_cli.session.user_id import UserIdentifier
+from tests.server.auth_test_utils import FixedIdentityAuthPlugin
 
 DEFAULT_CTX = RequestContext(
     user=UserIdentifier.the_default_user("test_user"),
@@ -1009,8 +1009,8 @@ async def test_mcp_middleware_sets_actor_peer_context():
         await send({"type": "http.response.body", "body": response.content})
 
     app = FastAPI()
-    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
     app.routes.append(Route("/mcp", endpoint=_IdentityASGIMiddleware(downstream), methods=["POST"]))
 
     transport = httpx.ASGITransport(app=app)
@@ -1046,8 +1046,8 @@ async def test_mcp_middleware_propagates_request_api_key(headers, expected_api_k
         await send({"type": "http.response.body", "body": response.content})
 
     app = FastAPI()
-    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
     app.routes.append(Route("/mcp", endpoint=_IdentityASGIMiddleware(downstream), methods=["POST"]))
 
     transport = httpx.ASGITransport(app=app)
@@ -1066,8 +1066,8 @@ async def test_mcp_middleware_rejects_invalid_actor_peer_header():
         raise AssertionError("invalid actor peer header should not reach downstream app")
 
     app = FastAPI()
-    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
     app.routes.append(Route("/mcp", endpoint=_IdentityASGIMiddleware(downstream), methods=["POST"]))
 
     transport = httpx.ASGITransport(app=app)
@@ -1935,7 +1935,7 @@ async def test_download_checks_with_user_role_outside_api_key_mode(
         mcp_endpoint,
         "get_server_config",
         lambda: SimpleNamespace(
-            get_effective_auth_mode=lambda: "dev",
+            get_effective_auth_mode=lambda: "trusted",
             upload_signed_ttl_seconds=600,
         ),
     )
@@ -2687,8 +2687,8 @@ async def test_mcp_middleware_stamps_and_uses_root_identity_for_home_alias():
         await send({"type": "http.response.body", "body": response.content})
 
     app = FastAPI()
-    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
     app.routes.append(Route("/mcp", endpoint=_IdentityASGIMiddleware(downstream), methods=["POST"]))
 
     async def seed_root_span(scope, receive, send):

@@ -5,7 +5,8 @@
         "port": 1933,
         "executor_threads": 0,
         "timeout_keep_alive": 5,
-        "root_api_key": null,
+        "auth_mode": "api_key",
+        "root_api_key": "replace-with-a-random-secret",
         "cors_origins": ["*"],
         "agent_evolution": {
             "enabled": false,

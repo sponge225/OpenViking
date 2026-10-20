@@ -40,13 +40,11 @@ const TEXT_INPUT_PROMPT: &str = "  > ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IdentityMode {
-    LocalNoKey,
     RootKey,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CustomKeyMode {
-    NoKey,
     UserKey,
     RootKey,
 }
@@ -366,10 +364,8 @@ fn custom_api_key_input_label(mode: CustomKeyMode) -> &'static str {
     match (Language::current(), mode) {
         (Language::En, CustomKeyMode::RootKey) => "Root API key",
         (Language::En, CustomKeyMode::UserKey) => "User API key",
-        (Language::En, CustomKeyMode::NoKey) => "API key",
         (Language::ZhCn, CustomKeyMode::RootKey) => "Root API Key",
         (Language::ZhCn, CustomKeyMode::UserKey) => "User API Key",
-        (Language::ZhCn, CustomKeyMode::NoKey) => "API Key",
     }
 }
 
@@ -379,12 +375,8 @@ fn custom_api_key_input_helper_lines(mode: CustomKeyMode) -> Vec<String> {
             "For self-hosted admin setup and --sudo commands."
         }
         (Language::En, CustomKeyMode::UserKey) => "For normal OpenViking commands.",
-        (Language::En, CustomKeyMode::NoKey) => {
-            "Optional for local servers. Add one if auth is enabled."
-        }
         (Language::ZhCn, CustomKeyMode::RootKey) => "用于自定义管理初始化和 --sudo 命令。",
         (Language::ZhCn, CustomKeyMode::UserKey) => "用于常规 OpenViking 命令。",
-        (Language::ZhCn, CustomKeyMode::NoKey) => "本地服务可不填；如果启用了认证，请填写。",
     };
     vec![theme::muted(copy).to_string()]
 }
@@ -395,18 +387,17 @@ fn custom_key_mode_labels(allow_empty: bool) -> Vec<&'static str> {
 }
 
 fn custom_key_mode_labels_for_language(allow_empty: bool, language: Language) -> Vec<&'static str> {
-    match (allow_empty, language) {
-        (true, Language::En) => vec!["No key / local dev", "User API key", "Root API key"],
-        (false, Language::En) => vec!["User API key", "Root API key"],
-        (true, Language::ZhCn) => vec!["无密钥 / 本地开发", "User API Key", "Root API Key"],
-        (false, Language::ZhCn) => vec!["User API Key", "Root API Key"],
+    let _ = allow_empty;
+    match language {
+        Language::En => vec!["User API key", "Root API key"],
+        Language::ZhCn => vec!["User API Key", "Root API Key"],
     }
 }
 
 fn custom_key_mode_for_selection(allow_empty: bool, index: usize) -> CustomKeyMode {
-    match (allow_empty, index) {
-        (true, 0) => CustomKeyMode::NoKey,
-        (true, 1) | (false, 0) => CustomKeyMode::UserKey,
+    let _ = allow_empty;
+    match index {
+        0 => CustomKeyMode::UserKey,
         _ => CustomKeyMode::RootKey,
     }
 }
@@ -1799,16 +1790,8 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                         root_api_key = None;
                         account = None;
                         user = None;
-                        match selected {
-                            CustomKeyMode::NoKey => {
-                                identity_mode = Some(IdentityMode::LocalNoKey);
-                                stage = Stage::Account;
-                            }
-                            CustomKeyMode::UserKey | CustomKeyMode::RootKey => {
-                                identity_mode = None;
-                                stage = Stage::ApiKey;
-                            }
-                        }
+                        identity_mode = None;
+                        stage = Stage::ApiKey;
                     }
                     PromptResult::Back => stage = Stage::Url,
                     PromptResult::Quit => {
@@ -1867,7 +1850,7 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                 }
             }
             Stage::Account => {
-                let mode = identity_mode.unwrap_or(IdentityMode::LocalNoKey);
+                let mode = identity_mode.unwrap_or(IdentityMode::RootKey);
                 match prompt_identity_value(
                     ui,
                     section_add(),
@@ -1882,10 +1865,7 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                     PromptResult::Back => {
                         account = None;
                         user = None;
-                        stage = match identity_mode {
-                            Some(IdentityMode::LocalNoKey) => Stage::KeyMode,
-                            Some(IdentityMode::RootKey) | None => Stage::ApiKey,
-                        };
+                        stage = Stage::ApiKey;
                     }
                     PromptResult::Quit => {
                         print_cancelled(ui)?;
@@ -1894,7 +1874,7 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                 }
             }
             Stage::User => {
-                let mode = identity_mode.unwrap_or(IdentityMode::LocalNoKey);
+                let mode = identity_mode.unwrap_or(IdentityMode::RootKey);
                 match prompt_identity_value(
                     ui,
                     section_add(),
@@ -2371,13 +2351,8 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                                     api_key = None;
                                     root_api_key = None;
                                     key_mode = None;
-                                    if custom_allows_empty_api_key(&url) {
-                                        identity_mode = Some(IdentityMode::LocalNoKey);
-                                        stage = Stage::Account;
-                                    } else {
-                                        identity_mode = None;
-                                        stage = Stage::Validate;
-                                    }
+                                    identity_mode = None;
+                                    stage = Stage::Validate;
                                 }
                             }
                         }
@@ -2438,13 +2413,8 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                         key_mode = None;
                         key_edit_action = None;
                         api_key_was_entered = false;
-                        if kind == ConfigKind::Custom && custom_allows_empty_api_key(&url) {
-                            identity_mode = Some(IdentityMode::LocalNoKey);
-                            stage = Stage::Account;
-                        } else {
-                            identity_mode = None;
-                            stage = Stage::Validate;
-                        }
+                        identity_mode = None;
+                        stage = Stage::Validate;
                     }
                     PromptResult::Back => {
                         stage = if kind == ConfigKind::OpenVikingService {
@@ -2478,16 +2448,8 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                         root_api_key = None;
                         key_edit_action = None;
                         api_key_was_entered = false;
-                        match selected {
-                            CustomKeyMode::NoKey => {
-                                identity_mode = Some(IdentityMode::LocalNoKey);
-                                stage = Stage::Account;
-                            }
-                            CustomKeyMode::UserKey | CustomKeyMode::RootKey => {
-                                identity_mode = None;
-                                stage = Stage::ApiKeyInput;
-                            }
-                        }
+                        identity_mode = None;
+                        stage = Stage::ApiKeyInput;
                     }
                     PromptResult::Back => stage = Stage::ApiKeyChoice,
                     PromptResult::Quit => {
@@ -2570,7 +2532,7 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                 }
             }
             Stage::Account => {
-                let mode = identity_mode.unwrap_or(IdentityMode::LocalNoKey);
+                let mode = identity_mode.unwrap_or(IdentityMode::RootKey);
                 match prompt_identity_value(
                     ui,
                     section_edit(),
@@ -2585,10 +2547,7 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                     PromptResult::Back => {
                         account = None;
                         user = None;
-                        stage = match identity_mode {
-                            Some(IdentityMode::LocalNoKey) => Stage::KeyMode,
-                            Some(IdentityMode::RootKey) | None => Stage::ApiKeyInput,
-                        };
+                        stage = Stage::ApiKeyInput;
                     }
                     PromptResult::Quit => {
                         print_cancelled(ui)?;
@@ -2597,7 +2556,7 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                 }
             }
             Stage::User => {
-                let mode = identity_mode.unwrap_or(IdentityMode::LocalNoKey);
+                let mode = identity_mode.unwrap_or(IdentityMode::RootKey);
                 match prompt_identity_value(
                     ui,
                     section_edit(),
@@ -5319,18 +5278,6 @@ fn identity_prompt_parts(
     mode: IdentityMode,
 ) -> (Option<&'static str>, Option<InputValueLabel>, Vec<String>) {
     match mode {
-        IdentityMode::LocalNoKey => (
-            Some("default"),
-            Some(InputValueLabel::Default),
-            vec![
-                theme::muted(copy(
-                    Language::current(),
-                    "Local no-key identity.",
-                    "本地无密钥身份。",
-                ))
-                .to_string(),
-            ],
-        ),
         IdentityMode::RootKey => (
             None,
             None,
@@ -7128,10 +7075,10 @@ mod tests {
     }
 
     #[test]
-    fn custom_key_mode_choices_distinguish_no_key_user_key_and_root_key() {
+    fn custom_key_mode_choices_require_user_or_root_key() {
         assert_eq!(
             custom_key_mode_labels(true),
-            ["No key / local dev", "User API key", "Root API key"]
+            ["User API key", "Root API key"]
         );
         assert_eq!(
             custom_key_mode_labels(false),
@@ -7168,26 +7115,6 @@ mod tests {
         assert!(!text.contains("(existing value)"));
         assert!(!text.contains("Default:"));
         assert!(!text.contains("Current:"));
-    }
-
-    #[test]
-    fn local_no_key_identity_prompt_shows_default_identity() {
-        let (default, value_label, helper_lines) = identity_prompt_parts(IdentityMode::LocalNoKey);
-        let lines = input_live_lines(
-            "Create a new OpenViking config.",
-            "Account ID",
-            default,
-            value_label,
-            false,
-            &helper_lines,
-            None,
-        );
-        let text = lines.join("\n");
-
-        assert!(text.contains("Default:"));
-        assert!(text.contains("default"));
-        assert!(text.contains("Local no-key identity."));
-        assert!(!text.contains("Press Enter"));
     }
 
     #[test]

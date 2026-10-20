@@ -313,7 +313,7 @@ mod tests {
             "status": "ok",
             "healthy": true,
             "version": "0.3.18.dev29",
-            "auth_mode": "dev"
+            "auth_mode": "trusted"
         });
         let config = Config {
             account: Some("default".to_string()),

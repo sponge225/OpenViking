@@ -18,9 +18,9 @@ import openviking.server.routers.compile as compile_router_module
 import openviking.server.routers.tasks as tasks_router_module
 import openviking.service.compile_service as compile_service_module
 import openviking.service.external_task_service as external_task_service_module
-from openviking.server.auth.plugins import DevAuthPlugin, TrustedAuthPlugin
+from openviking.server.auth.plugins import TrustedAuthPlugin
 from openviking.server.config import ServerConfig
-from openviking.server.identity import AuthMode, RequestContext, Role
+from openviking.server.identity import RequestContext, Role
 from openviking.service.compile_service import CompileService
 from openviking.service.external_task_service import ExternalTaskService
 from openviking.service.task_store import PersistentTaskStore
@@ -28,6 +28,7 @@ from openviking.service.task_tracker import TaskRecord, TaskStatus, TaskTracker
 from openviking.storage.queuefs import QueueManager
 from openviking.storage.queuefs.external_task_processor import ExternalTaskProcessor
 from openviking_cli.session.user_id import UserIdentifier
+from tests.server.auth_test_utils import FixedIdentityAuthPlugin
 from openviking_cli.utils.config.open_viking_config import CompileApiConfig
 from tests.utils.mock_agfs import MockLocalAGFS
 
@@ -80,8 +81,8 @@ async def test_feedback_proxy_forwards_request(monkeypatch):
     monkeypatch.setattr(bot_router_module, "_create_bot_proxy_client", lambda: FakeClient())
 
     app = FastAPI()
-    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
     app.include_router(bot_router_module.router, prefix="/bot/v1")
     transport = httpx.ASGITransport(app=app)
 
@@ -135,8 +136,8 @@ async def test_interrupt_proxy_forwards_session_interrupt(monkeypatch):
     monkeypatch.setattr(bot_router_module, "_create_bot_proxy_client", lambda: FakeClient())
 
     app = FastAPI()
-    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
     app.include_router(bot_router_module.router, prefix="/bot/v1")
     transport = httpx.ASGITransport(app=app)
 
@@ -789,8 +790,8 @@ async def test_chat_proxy_strips_client_openviking_connection_in_dev_mode(monkey
     monkeypatch.setattr(bot_router_module, "_create_bot_proxy_client", lambda: FakeClient())
 
     app = FastAPI()
-    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
     app.include_router(bot_router_module.router, prefix="/bot/v1")
     transport = httpx.ASGITransport(app=app)
 
@@ -851,8 +852,8 @@ async def test_chat_stream_proxy_preserves_sse_event_boundaries(monkeypatch):
     monkeypatch.setattr(bot_router_module, "_create_bot_proxy_client", lambda: FakeClient())
 
     app = FastAPI()
-    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
-    app.state.auth_plugin = DevAuthPlugin()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
     app.include_router(bot_router_module.router, prefix="/bot/v1")
 
     async with httpx.AsyncClient(

@@ -297,7 +297,8 @@ Search 和 Find 请求的默认 `limit` 为 `10`，可以在每次 API 或 SDK �
     "port": 1933,
     "workers": 1,
     "executor_threads": 0,
-    "auth_mode": "dev",
+    "auth_mode": "trusted",
+    "root_api_key": "替换为随机密钥",
     "cors_origins": ["http://localhost:5173"],
     "profile_enabled": false,
     "temp_upload": {
@@ -316,8 +317,8 @@ Search 和 Find 请求的默认 `limit` 为 `10`，可以在每次 API 或 SDK �
 | `workers` | integer | `1` | 服务进程数量 |
 | `executor_threads` | 非负整数 | `0` | 每个服务进程的 asyncio 默认 executor 最大线程数；`0` 表示沿用 Python 默认策略 |
 | `timeout_keep_alive` | integer（秒） | `5` | 空闲 HTTP keep-alive 超时；应调大到超过上游空闲连接寿命 |
-| `auth_mode` | `dev`、`api_key`、`trusted` / `null` | `null` | 鉴权模式；空值根据 `root_api_key` 自动判断 |
-| `root_api_key` | string / `null` | `null` | Root API Key；配置后默认启用 `api_key` 模式 |
+| `auth_mode` | `api_key`、`trusted` / `null` | `null` | 鉴权模式；空值选择 `api_key` |
+| `root_api_key` | string / `null` | `null` | `api_key` 和 `trusted` 模式必填的 Root API Key |
 | `cors_origins` | string[] | `["*"]` | 允许的跨域来源 |
 | `profile_enabled` | boolean | `false` | 是否允许请求返回性能 profile |
 | `with_bot` | boolean | `false` | 是否启用 VikingBot API 代理 |

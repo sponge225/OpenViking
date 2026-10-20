@@ -11,7 +11,6 @@ from pydantic import ValidationError
 
 from openviking.pyagfs import AGFSNotFoundError
 from openviking.server.app import create_app
-from openviking.server.auth.plugins import DevAuthPlugin
 from openviking.server.config import AgentEvolutionConfig, ServerConfig, UserConfig
 from openviking.server.dependencies import set_service
 from openviking.server.identity import RequestContext, Role
@@ -20,6 +19,7 @@ from openviking.service.session_service import SessionService
 from openviking.session import Session
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.open_viking_config import OpenVikingConfig
+from tests.server.auth_test_utils import FixedIdentityAuthPlugin
 
 
 class _FakeAGFS:
@@ -137,9 +137,9 @@ async def settings_http(fake_viking_fs, monkeypatch):
     )
     app = create_app(config=ServerConfig(), service=service)
     set_service(service)
-    app.state.auth_plugin = DevAuthPlugin()
-    # Admin routes gate on a present APIKeyManager; DevAuthPlugin resolves ROOT
-    # but leaves it None, so provide a stand-in that reports the default account.
+    app.state.auth_plugin = FixedIdentityAuthPlugin()
+    # Admin routes gate on a present APIKeyManager, so provide a stand-in that
+    # reports the default account.
     app.state.api_key_manager = _FakeApiKeyManager(["default"])
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:

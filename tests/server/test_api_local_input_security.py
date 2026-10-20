@@ -17,7 +17,7 @@ from tests.server.ovpack_test_helpers import build_ovpack_bytes
 
 
 def _allow_admin_api_in_dev_mode(client: httpx.AsyncClient) -> None:
-    # Admin routes require the app to have an API key manager, even in dev-mode tests.
+    # Admin routes require the app to have an API key manager in fixed-identity tests.
     client._transport.app.state.api_key_manager = object()
 
 
