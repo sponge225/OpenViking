@@ -1568,6 +1568,38 @@ class TestPartialUpdate:
             "workers": 4,
         }
 
+    def test_update_server_summary_uses_gateway_forced_api_key_mode(self, tmp_path):
+        config_path = tmp_path / "ov.conf"
+        original = _existing_config()
+        original["server"].update({"auth_mode": "api_key", "root_api_key": "rk"})
+        original["gateway"] = {"enabled": True}
+        config_path.write_text(json.dumps(original), encoding="utf-8")
+
+        with (
+            patch(
+                "openviking_cli.setup_wizard._wizard_server",
+                return_value={
+                    "host": "127.0.0.1",
+                    "port": 1933,
+                    "auth_mode": "trusted",
+                    "root_api_key": "rk",
+                },
+            ),
+            patch("openviking_cli.setup_wizard._prompt_gateway_access"),
+            patch("openviking_cli.setup_wizard._prompt_confirm", return_value=True),
+            patch("openviking_cli.setup_wizard._post_save_actions", return_value=None),
+            patch("builtins.print") as mock_print,
+        ):
+            assert _update_existing_config(config_path, "server") == 0
+
+        output = "\n".join(
+            " ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list
+        )
+        assert "→" in output
+        assert "auth api_key" in output
+        assert "auth trusted" not in output
+        assert json.loads(config_path.read_text())["server"]["auth_mode"] == "api_key"
+
     def test_embedding_dimension_change_requires_confirmation(self, tmp_path):
         config_path = tmp_path / "ov.conf"
         original = _existing_config()

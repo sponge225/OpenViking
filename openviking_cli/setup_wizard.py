@@ -2163,14 +2163,14 @@ def _update_existing_config(config_path: Path, section: str) -> int:
         if server_dict is None:
             print("\n  Setup cancelled.\n")
             return 0
-        old_summary, new_summary = (
-            _summarize_server(current_server),
-            _summarize_server(server_dict),
-        )
         updated_server = {**current_server, **server_dict}
         gateway = _config_section(data, "gateway")
         if gateway.get("enabled") and updated_server.get("auth_mode") == "trusted":
             updated_server["auth_mode"] = "api_key"
+        old_summary, new_summary = (
+            _summarize_server(current_server),
+            _summarize_server(updated_server),
+        )
         data["server"] = updated_server
         if gateway.get("enabled"):
             _prompt_gateway_access(updated_server, gateway)

@@ -4,6 +4,7 @@
 """Tests for multi-tenant authentication (openviking/server/auth.py)."""
 
 import uuid
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -1508,10 +1509,13 @@ async def test_trusted_mode_http_routes_accept_api_key_when_root_key_configured(
 
 
 def test_validate_no_key_fails_on_every_host():
-    for host in ("127.0.0.1", "localhost", "::1"):
-        config = ServerConfig(host=host, root_api_key=None)
-        with pytest.raises(SystemExit):
-            validate_server_config(config)
+    with patch("logging.getLogger") as get_logger:
+        for host in ("127.0.0.1", "localhost", "::1"):
+            config = ServerConfig(host=host, root_api_key=None)
+            with pytest.raises(SystemExit):
+                validate_server_config(config)
+    messages = "\n".join(call.args[0] for call in get_logger.return_value.error.call_args_list)
+    assert "Update server & auth" in messages
 
 
 def test_validate_no_key_non_localhost_raises():
@@ -1532,6 +1536,7 @@ def test_validate_removed_dev_mode_reports_migration(monkeypatch):
     text = "\n".join(messages)
     assert "auth_mode='dev' has been removed" in text
     assert "openviking-server init" in text
+    assert "Update server & auth" in text
 
 
 def test_validate_with_key_any_host_passes():

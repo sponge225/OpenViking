@@ -25,10 +25,11 @@ use crate::{
 use serde_json::Value;
 
 use super::store::{
-    ApiKeyRole, ConfigDraft, ConfigEntry, ConfigKind, ConfigStore, IdentityField,
-    OPENVIKING_SERVICE_URL, build_config, custom_allows_empty_api_key, normalize_custom_url,
-    validate_candidate_config, validate_candidate_config_with_role, validate_config,
-    validate_config_name, validate_identity_value, validation_error_copy, validation_error_copy_zh,
+    ApiKeyRole, CandidateValidation, ConfigDraft, ConfigEntry, ConfigKind, ConfigStore,
+    IdentityField, OPENVIKING_SERVICE_URL, build_config, custom_allows_empty_api_key,
+    normalize_custom_url, validate_candidate_config, validate_candidate_config_detailed,
+    validate_candidate_config_with_role, validate_config, validate_config_name,
+    validate_identity_value, validation_error_copy, validation_error_copy_zh,
 };
 
 const OPENVIKING_SERVICE_API_KEY_URL: &str =
@@ -1915,8 +1916,9 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                         mut config,
                         mut api_key_role,
                         root_api_key_role,
+                        server_auth_mode,
                     }) => {
-                        if root_key_used_for_normal_commands(&config) {
+                        if should_select_user_with_root_key(&config, server_auth_mode.as_deref()) {
                             let root_key = config.root_api_key.clone().unwrap_or_default();
                             match select_user_with_root_key(ui, section_add(), &config, &root_key)
                                 .await?
@@ -2596,8 +2598,9 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                         mut config,
                         mut api_key_role,
                         root_api_key_role,
+                        server_auth_mode,
                     }) => {
-                        if root_key_used_for_normal_commands(&config) {
+                        if should_select_user_with_root_key(&config, server_auth_mode.as_deref()) {
                             let root_key = config.root_api_key.clone().unwrap_or_default();
                             match select_user_with_root_key(ui, section_edit(), &config, &root_key)
                                 .await?
@@ -4779,6 +4782,7 @@ struct ValidatedConfig {
     config: Config,
     api_key_role: Option<ApiKeyRole>,
     root_api_key_role: Option<ApiKeyRole>,
+    server_auth_mode: Option<String>,
 }
 
 async fn validate_draft(
@@ -4798,7 +4802,7 @@ async fn validate_draft(
         ),
     ))?;
     let mut root_api_key_role = None;
-    let api_key_role = if config
+    let (api_key_role, server_auth_mode) = if config
         .api_key
         .as_deref()
         .is_some_and(|key| !key.trim().is_empty())
@@ -4811,7 +4815,10 @@ async fn validate_draft(
         let mut detection_config = config.clone();
         detection_config.account = None;
         detection_config.user = None;
-        let role = validate_candidate_config_with_role(&detection_config, require_api_key).await?;
+        let CandidateValidation {
+            api_key_role: role,
+            auth_mode,
+        } = validate_candidate_config_detailed(&detection_config, require_api_key).await?;
         if config.root_api_key.as_deref() == config.api_key.as_deref() {
             root_api_key_role = role;
         }
@@ -4848,15 +4855,16 @@ async fn validate_draft(
             config.account = None;
             config.user = None;
         }
-        role
+        (role, auth_mode)
     } else {
-        validate_candidate_config(&config, require_api_key).await?;
-        None
+        let validation = validate_candidate_config_detailed(&config, require_api_key).await?;
+        (validation.api_key_role, validation.auth_mode)
     };
     Ok(ValidatedConfig {
         config,
         api_key_role,
         root_api_key_role,
+        server_auth_mode,
     })
 }
 
@@ -5026,6 +5034,10 @@ fn root_key_used_for_normal_commands(config: &Config) -> bool {
     };
 
     !api_key.is_empty() && api_key == root_api_key
+}
+
+fn should_select_user_with_root_key(config: &Config, server_auth_mode: Option<&str>) -> bool {
+    server_auth_mode != Some("trusted") && root_key_used_for_normal_commands(config)
 }
 
 fn next_step_copy() -> String {
@@ -6084,9 +6096,10 @@ mod tests {
         root_key_normal_command_notice_lines, root_key_redirect_labels,
         root_key_used_for_normal_commands, root_key_user_selection_labels, root_users_from_value,
         save_config, saved_summary_render_parts, select_live_lines,
-        should_confirm_detected_user_key, should_prompt_root_identity, status_box_frame_for_size,
-        status_box_lines, status_box_lines_with_runtime, status_box_lines_with_runtime_width,
-        status_box_width, status_payload_is_healthy, styled_logo_to_width_for_color_level,
+        should_confirm_detected_user_key, should_prompt_root_identity,
+        should_select_user_with_root_key, status_box_frame_for_size, status_box_lines,
+        status_box_lines_with_runtime, status_box_lines_with_runtime_width, status_box_width,
+        status_payload_is_healthy, styled_logo_to_width_for_color_level,
         styled_wordmark_line_for_color_level, switch_validation_error_lines,
         tagline_color_for_theme, user_key_from_response, user_key_redirect_labels,
         user_management_config_context, user_management_config_from_server_url,
@@ -7632,6 +7645,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_root_key_config_keeps_deployment_key_without_user_key_selection() {
+        let url = spawn_trusted_probe_server("root-key").await;
+        let draft = ConfigDraft {
+            name: "local".to_string(),
+            kind: ConfigKind::Custom,
+            url,
+            api_key: Some("root-key".to_string()),
+            root_api_key: Some("root-key".to_string()),
+            account: Some("default".to_string()),
+            user: Some("default".to_string()),
+        };
+        let mut ui = super::LiveRegion::default();
+
+        let validated = validate_draft(&mut ui, "test", &draft)
+            .await
+            .expect("trusted root key and explicit identity should validate");
+
+        assert_eq!(validated.server_auth_mode.as_deref(), Some("trusted"));
+        assert_eq!(validated.config.api_key.as_deref(), Some("root-key"));
+        assert_eq!(validated.config.root_api_key.as_deref(), Some("root-key"));
+        assert_eq!(validated.config.account.as_deref(), Some("default"));
+        assert_eq!(validated.config.user.as_deref(), Some("default"));
+        assert!(!should_select_user_with_root_key(
+            &validated.config,
+            validated.server_auth_mode.as_deref(),
+        ));
+    }
+
+    #[tokio::test]
     async fn validated_user_key_config_preserves_separate_root_api_key_for_sudo() {
         let url = spawn_dual_key_probe_server("user-key", "root-key").await;
         let draft = ConfigDraft {
@@ -7749,6 +7791,47 @@ mod tests {
                     }
                 } else {
                     http_response(404, r#"{"error":{"message":"not found"}}"#)
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_trusted_probe_server(root_api_key: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("test server should have addr");
+        tokio::spawn(async move {
+            for _ in 0..6 {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = vec![0; 4096];
+                let Ok(read) = stream.read(&mut buffer).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let lower_request = request.to_ascii_lowercase();
+                let root_header = format!("x-api-key: {root_api_key}");
+                let response = if request.starts_with("GET /health ") {
+                    http_response(200, r#"{"healthy":true,"auth_mode":"trusted"}"#)
+                } else if request.starts_with("GET /api/v1/admin/accounts ")
+                    && lower_request.contains(&root_header)
+                {
+                    http_response(200, r#"{"accounts":[]}"#)
+                } else if request.starts_with("GET /api/v1/system/status ")
+                    && lower_request.contains(&root_header)
+                    && lower_request.contains("x-openviking-account: default")
+                    && lower_request.contains("x-openviking-user: default")
+                {
+                    http_response(200, r#"{"status":"ok","result":{"initialized":true}}"#)
+                } else {
+                    http_response(
+                        401,
+                        r#"{"error":{"code":"AuthenticationError","message":"invalid identity"}}"#,
+                    )
                 };
                 let _ = stream.write_all(response.as_bytes()).await;
             }

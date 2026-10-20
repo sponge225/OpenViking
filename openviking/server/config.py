@@ -599,10 +599,10 @@ def validate_server_config(config: ServerConfig) -> None:
     if effective_auth_mode == "dev":
         logger.error(
             "server.auth_mode='dev' has been removed because it exposed an "
-            "unauthenticated ROOT endpoint. Run `openviking-server init` to update "
-            "the configuration. Use trusted mode with a non-empty root_api_key for "
-            "local direct access, or api_key/OIDC/LDAP for gateway, remote, or "
-            "multi-user deployments."
+            "unauthenticated ROOT endpoint. Run `openviking-server init`, then choose "
+            "`Update server & auth` to update the configuration. Use trusted mode with "
+            "a non-empty root_api_key for local direct access, or api_key/OIDC/LDAP "
+            "for gateway, remote, or multi-user deployments."
         )
         sys.exit(1)
 

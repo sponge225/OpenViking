@@ -51,6 +51,12 @@ pub(crate) enum ApiKeyRole {
     Regular,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateValidation {
+    pub api_key_role: Option<ApiKeyRole>,
+    pub auth_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdentityField {
     Account,
@@ -607,6 +613,15 @@ pub(crate) async fn validate_candidate_config_with_role(
     config: &Config,
     require_api_key: bool,
 ) -> Result<Option<ApiKeyRole>> {
+    validate_candidate_config_detailed(config, require_api_key)
+        .await
+        .map(|result| result.api_key_role)
+}
+
+pub(crate) async fn validate_candidate_config_detailed(
+    config: &Config,
+    require_api_key: bool,
+) -> Result<CandidateValidation> {
     config.validate_runtime_values()?;
 
     let api_key = non_empty_option(config.api_key.as_deref());
@@ -638,8 +653,11 @@ pub(crate) async fn validate_candidate_config_with_role(
         ));
     }
 
-    let auth_mode = value.get("auth_mode").and_then(Value::as_str);
-    if matches!(auth_mode, Some("api_key" | "trusted")) && api_key.is_none() {
+    let auth_mode = value
+        .get("auth_mode")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if matches!(auth_mode.as_deref(), Some("api_key" | "trusted")) && api_key.is_none() {
         return Err(Error::Config("API key is required".to_string()));
     }
 
@@ -656,7 +674,7 @@ pub(crate) async fn validate_candidate_config_with_role(
     )
     .with_gateway_token(config.effective_gateway_token());
 
-    if auth_mode == Some("trusted") {
+    if auth_mode.as_deref() == Some("trusted") {
         let root_client = BaseClient::new(
             &config.url,
             auth.api_key,
@@ -672,18 +690,28 @@ pub(crate) async fn validate_candidate_config_with_role(
         if auth.account.is_some() && auth.user.is_some() {
             let _: Value = client.get("/api/v1/system/status", &[]).await?;
         }
-        return Ok(Some(ApiKeyRole::Root));
+        return Ok(CandidateValidation {
+            api_key_role: Some(ApiKeyRole::Root),
+            auth_mode,
+        });
     }
 
-    if require_api_key || auth.api_key.is_some() || matches!(auth_mode, Some("api_key") | None) {
+    if require_api_key
+        || auth.api_key.is_some()
+        || matches!(auth_mode.as_deref(), Some("api_key") | None)
+    {
         let _: Value = client.get("/api/v1/system/status", &[]).await?;
     }
 
-    if auth.api_key.is_some() {
-        return detect_api_key_role(&client).await.map(Some);
-    }
-
-    Ok(None)
+    let api_key_role = if auth.api_key.is_some() {
+        Some(detect_api_key_role(&client).await?)
+    } else {
+        None
+    };
+    Ok(CandidateValidation {
+        api_key_role,
+        auth_mode,
+    })
 }
 
 async fn detect_api_key_role(client: &BaseClient) -> Result<ApiKeyRole> {

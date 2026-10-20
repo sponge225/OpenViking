@@ -157,9 +157,9 @@ class ApiKeyAuthPlugin(AuthPlugin):
         logger = logging.getLogger(__name__)
         logger.error(
             "server.auth_mode='api_key' requires a non-empty server.root_api_key, "
-            "including on localhost. Run `openviking-server init` to update the "
-            "configuration, or set auth_mode='trusted' with a root_api_key for "
-            "trusted local direct access."
+            "including on localhost. Run `openviking-server init`, then choose "
+            "`Update server & auth` to update the configuration, or set "
+            "auth_mode='trusted' with a root_api_key for trusted local direct access."
         )
         sys.exit(1)
 

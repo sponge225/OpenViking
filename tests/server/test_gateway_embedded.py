@@ -132,22 +132,28 @@ async def test_server_lifespan_routes_defaults_and_cors(tmp_path, monkeypatch, m
     monkeypatch.setattr(global_api, "shutdown_metrics_async", AsyncMock())
     monkeypatch.setattr(usage_audit, "init_usage_audit_from_server_config", AsyncMock())
     monkeypatch.setattr(usage_audit, "shutdown_usage_audit", AsyncMock())
-    # Calls back to OV are represented by an authenticated public health response.
     # A source checkout reports a dev version, which must not trip the minimum-version gate.
-    monkeypatch.setattr(
-        VikingClient,
-        "request",
-        AsyncMock(
-            return_value={
-                "status": "ok",
-                "auth_mode": "api_key",
-                "version": "0.1.dev1",
+    async def openviking_request(self, method, path, key, body=None, timeout=30):
+        assert method == "GET" and path == "/health"
+        result = {"status": "ok", "auth_mode": "api_key", "version": "0.1.dev1"}
+        if key == "test-root":
+            return {
+                **result,
                 "role": "root",
+                "account_id": "default",
+                "user_id": "root",
+            }
+        if key == "default-admin-key":
+            return {
+                **result,
+                "role": "admin",
                 "account_id": "default",
                 "user_id": "default",
             }
-        ),
-    )
+        assert key == ""
+        return result
+
+    monkeypatch.setattr(VikingClient, "request", openviking_request)
     service = SimpleNamespace(
         vlm_resolver=SimpleNamespace(
             effective_vlm_config=AsyncMock(
@@ -192,22 +198,67 @@ async def test_server_lifespan_routes_defaults_and_cors(tmp_path, monkeypatch, m
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app), base_url="http://test"
         ) as client:
-            access = await client.get("/gateway/admin/access")
+            root_headers = {"X-API-Key": "test-root"}
+            access = await client.get("/gateway/admin/access", headers=root_headers)
             assert access.status_code == 200
             assert access.json()["can_import_vlm"] is True
             assert access.json()["role"] == "root"
-            upstreams = (await client.get("/gateway/admin/upstreams")).json()
+            upstreams = (
+                await client.get("/gateway/admin/upstreams", headers=root_headers)
+            ).json()
             assert upstreams == []
             await seed_defaults(app.state.gateway_app, "default")
-            upstreams = (await client.get("/gateway/admin/upstreams")).json()
+            upstreams = (
+                await client.get("/gateway/admin/upstreams", headers=root_headers)
+            ).json()
             assert len(upstreams) == 1
             policy = await app.state.gateway_app.state.management.get(
                 "default", "policies", "default"
             )
             assert policy["name"] == "Default"
+            created = await client.post(
+                "/gateway/admin/keys",
+                headers=root_headers,
+                json={
+                    "name": "test",
+                    "user_id": "default",
+                    "openviking_key": "default-admin-key",
+                    "policy_id": "default",
+                    "upstream_ids": [upstreams[0]["id"]],
+                },
+            )
+            assert created.status_code == 200, created.text
+            bearer = {"Authorization": "Bearer " + created.json()["key"]}
+            response = await client.get("/gateway/v1/models", headers=bearer)
+            assert response.status_code == 200, response.text
+            assert response.json()["data"][0]["id"] == "gpt"
             # The server no longer claims the model-API prefixes at its root.
             for old in ("/v1/models", "/api/v3/models", "/api/v1/admin/gateway/access"):
-                assert (await client.get(old)).status_code == 404, old
+                assert (await client.get(old, headers=bearer)).status_code == 404, old
+            await app.state.gateway_app.state.management.save(
+                "default",
+                "policies",
+                "default",
+                {
+                    **policy,
+                    "capture": False,
+                    "recall": False,
+                    "profile": False,
+                    "gateway_tools": False,
+                },
+            )
+            response = await client.post(
+                "/gateway/v1/chat/completions",
+                headers=bearer,
+                json={"model": "gpt", "messages": [{"role": "user", "content": "hello"}]},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["choices"][0]["message"]["content"] == "hello"
+            response = await client.patch(
+                "/gateway/v1/files/f-1?purpose=batch", headers=bearer
+            )
+            assert response.status_code == 200, response.text
+            assert model_server.seen == [("PATCH", "/v1/files/f-1", "purpose=batch")]
             assert (await client.get("/admin")).status_code == 404
             assert "service" not in (await client.get("/health")).json()
             preflight = await client.options(
