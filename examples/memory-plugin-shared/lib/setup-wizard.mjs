@@ -33,10 +33,53 @@ function readJsonSafe(path) {
   }
 }
 
+function requestSignal() {
+  return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(5000)
+    : undefined;
+}
+
+function isLoopbackUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+async function probeAuthMode(fetchImpl, url) {
+  try {
+    const response = await fetchImpl(`${url.replace(/\/+$/, "")}/health`, {
+      signal: requestSignal(),
+    });
+    if (!response.ok) return "";
+    const body = await response.json();
+    return typeof body?.auth_mode === "string" ? body.auth_mode : "";
+  } catch {
+    return "";
+  }
+}
+
+async function validateTrustedConnection(fetchImpl, { url, apiKey, account, user }) {
+  const response = await fetchImpl(`${url.replace(/\/+$/, "")}/api/v1/system/status`, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "X-OpenViking-Account": account,
+      "X-OpenViking-User": user,
+    },
+    signal: requestSignal(),
+  });
+  if (!response.ok) {
+    throw new Error(`Trusted connection validation failed (HTTP ${response.status}).`);
+  }
+}
+
 export async function runSetupWizard({
   input = process.stdin,
   output = process.stdout,
   env = process.env,
+  fetchImpl = globalThis.fetch,
 } = {}) {
   // cliPath is empty until the file exists; first-run writes go to the candidate
   // path (OPENVIKING_CLI_CONFIG_FILE, else ~/.openviking/ovcli.conf).
@@ -85,12 +128,57 @@ export async function runSetupWizard({
       say("API key is required.");
     }
 
+    const authMode = await probeAuthMode(fetchImpl, url);
+    const loopback = isLoopbackUrl(url);
+    let selectedAuthMode = authMode;
+    if (!selectedAuthMode && !loopback && mode !== "2") {
+      say("Server authentication mode could not be detected.");
+      say("  1) API Key");
+      say("  2) Trusted (requires account and user)");
+      const answer = (await rl.question("Choice [1/2, default 1]: ")).trim();
+      selectedAuthMode = answer === "2" ? "trusted" : "api_key";
+    }
+    const trusted = selectedAuthMode === "trusted" || (!selectedAuthMode && loopback);
+    const sameServer = current.url === url;
+    let account = sameServer ? current.account || "" : "";
+    let user = sameServer ? current.user || "" : "";
+    if (trusted) {
+      if (mode === "1") {
+        account ||= "default";
+        user ||= "default";
+      } else if (loopback && !authMode) {
+        account ||= "default";
+        user ||= "default";
+      } else {
+        const defaultAccount = account || "default";
+        const accountAnswer = (await rl.question(`Account [${defaultAccount}]: `)).trim();
+        account = accountAnswer || defaultAccount;
+        const defaultUser = user || "default";
+        const userAnswer = (await rl.question(`User [${defaultUser}]: `)).trim();
+        user = userAnswer || defaultUser;
+      }
+      if (authMode === "trusted") {
+        await validateTrustedConnection(fetchImpl, { url, apiKey, account, user });
+      }
+    }
+
     const next = { ...current, url, api_key: apiKey };
+    if (trusted) {
+      next.account = account;
+      next.user = user;
+    } else {
+      delete next.account;
+      delete next.user;
+    }
 
     say("");
     say("Changes:");
     say(`  url:     ${current.url || "(not set)"} -> ${next.url}`);
     say(`  api_key: ${maskSecret(current.api_key)} -> ${maskSecret(next.api_key)}`);
+    if (trusted) {
+      say(`  account: ${current.account || "(not set)"} -> ${next.account}`);
+      say(`  user:    ${current.user || "(not set)"} -> ${next.user}`);
+    }
     const confirm = (await rl.question("Write config? [Y/n] ")).trim().toLowerCase();
     if (confirm === "n" || confirm === "no") {
       say("Aborted; nothing written.");

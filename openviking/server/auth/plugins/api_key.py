@@ -150,7 +150,7 @@ class ApiKeyAuthPlugin(AuthPlugin):
         return identity
 
     def validate_config(self, config) -> None:
-        if config.root_api_key and config.root_api_key != "":
+        if config.root_api_key and config.root_api_key.strip():
             return
         import logging
 
@@ -164,10 +164,11 @@ class ApiKeyAuthPlugin(AuthPlugin):
         sys.exit(1)
 
     async def initialize(self, app, service, config) -> None:
-        if not config.root_api_key or config.root_api_key == "":
+        root_api_key = config.root_api_key.strip() if config.root_api_key else ""
+        if not root_api_key:
             raise RuntimeError("api_key mode requires root_api_key")
         manager = build_api_key_manager(
-            root_key=config.root_api_key,
+            root_key=root_api_key,
             viking_fs=service.viking_fs,
             api_key_hashing_enabled=config.api_key_hashing_enabled,
             service_name=app.state.service_name,

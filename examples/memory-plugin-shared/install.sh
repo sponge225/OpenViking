@@ -1361,11 +1361,24 @@ prompt_connection() { # sets WIZ_URL / WIZ_KEY (WIZ_KEY may stay __OPENVIKING_KE
 # value.
 CUR_URL=""; CUR_KEY=""; CUR_ACCOUNT=""; CUR_USER=""
 CRED_URL=""; CRED_KEY="__OPENVIKING_KEEP__"; CRED_ACCOUNT="__OPENVIKING_KEEP__"; CRED_USER="__OPENVIKING_KEEP__"
+CRED_AUTH_MODE=""
 PROBE_RESULT=""
 PROBE_CODE=""
+PROBE_AUTH_MODE=""
 
 cred_value() { # cred_value <chosen> <stored>
   if [ "$1" = "__OPENVIKING_KEEP__" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi
+}
+
+is_loopback_url() {
+  node -e '
+    try {
+      const host = new URL(process.argv[1]).hostname.replace(/^\[|\]$/g, "");
+      process.exit(host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host) ? 0 : 1);
+    } catch {
+      process.exit(1);
+    }
+  ' "$1"
 }
 
 gather_credentials() {
@@ -1408,6 +1421,11 @@ gather_credentials() {
   if [ -z "$CRED_URL" ]; then
     CRED_URL="http://127.0.0.1:1933"
   fi
+  if [ "$CRED_URL" != "$CUR_URL" ]; then
+    CRED_AUTH_MODE=""
+    [ "$ACCOUNT_ARG" = "__OPENVIKING_UNSET__" ] && CRED_ACCOUNT=""
+    [ "$USER_ARG" = "__OPENVIKING_UNSET__" ] && CRED_USER=""
+  fi
   if [ -z "$(cred_value "$CRED_KEY" "$CUR_KEY")" ]; then
     err "$(t 'An OpenViking API key is required. Re-run with:' '必须提供 OpenViking API key。请使用以下参数重新运行：')"
     err "  $INSTALL_COMMAND --yes --url <server-url> --api-key <api-key>"
@@ -1424,11 +1442,24 @@ curl_header_line() { # curl_header_line <name> <value>
 }
 
 probe_server() { # probe_server <url> <key> <account> <user> -> PROBE_RESULT, PROBE_CODE
-  local url="${1%/}" key="$2" account="$3" user="$4"
+  local url="${1%/}" key="$2" account="$3" user="$4" health_body detected_auth_mode
+  PROBE_AUTH_MODE="$CRED_AUTH_MODE"
   PROBE_CODE="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "$url/health" 2>/dev/null || true)"
   case "$PROBE_CODE" in
     ''|000) PROBE_RESULT="unreachable"; return 0 ;;
   esac
+  health_body="$(curl -sS -m 5 "$url/health" 2>/dev/null || true)"
+  detected_auth_mode="$(printf '%s' "$health_body" | node -e '
+    let raw = "";
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      try {
+        const mode = JSON.parse(raw).auth_mode;
+        if (typeof mode === "string") process.stdout.write(mode);
+      } catch {}
+    });
+  ')"
+  [ -z "$detected_auth_mode" ] || PROBE_AUTH_MODE="$detected_auth_mode"
   PROBE_CODE="$(
     {
       [ -z "$key" ] || curl_header_line Authorization "Bearer $key"
@@ -1444,12 +1475,88 @@ probe_server() { # probe_server <url> <key> <account> <user> -> PROBE_RESULT, PR
   esac
 }
 
+resolve_unknown_remote_auth_mode() {
+  local account user
+  [ -z "$PROBE_AUTH_MODE" ] || return 0
+  is_loopback_url "$CRED_URL" && return 0
+  account="$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")"
+  user="$(cred_value "$CRED_USER" "$CUR_USER")"
+  if [ -n "$account" ] && [ -n "$user" ]; then
+    CRED_AUTH_MODE="trusted"
+    PROBE_AUTH_MODE="trusted"
+    return 0
+  fi
+  if [ "$INTERACTIVE" -ne 1 ]; then
+    err "$(t 'Cannot determine the remote server authentication mode. Start a server that reports /health.auth_mode, or pass both --account and --user for Trusted mode.' '无法确定远程服务认证模式。请启动会返回 /health.auth_mode 的服务，或为 Trusted 模式同时传入 --account 和 --user。')"
+    exit 2
+  fi
+  tui_menu "$(t 'Server authentication mode could not be detected.' '无法检测服务认证模式。')" 0 \
+    "$(t 'API Key' 'API Key')" \
+    "$(t 'Trusted (requires account and user)' 'Trusted（需要 account 和 user）')"
+  if [ "$TUI_MENU_CHOICE" -eq 1 ]; then
+    CRED_AUTH_MODE="trusted"
+    PROBE_AUTH_MODE="trusted"
+  else
+    CRED_AUTH_MODE="api_key"
+    PROBE_AUTH_MODE="api_key"
+  fi
+}
+
+ensure_trusted_identity() {
+  local account user reply
+  [ "$PROBE_AUTH_MODE" = "trusted" ] || return 0
+  account="$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")"
+  user="$(cred_value "$CRED_USER" "$CUR_USER")"
+  if [ -n "$account" ] && [ -n "$user" ]; then return 0; fi
+  if is_loopback_url "$CRED_URL"; then
+    [ -n "$account" ] || CRED_ACCOUNT="default"
+    [ -n "$user" ] || CRED_USER="default"
+    return 0
+  fi
+  if [ "$INTERACTIVE" -ne 1 ]; then
+    err "$(t 'Trusted mode requires both account and user. Re-run with:' 'Trusted 模式必须同时提供 account 和 user。请使用以下参数重新运行：')"
+    err "  $INSTALL_COMMAND --yes --url <server-url> --api-key <api-key> --account <account> --user <user>"
+    exit 2
+  fi
+  ask "$(t 'Account' 'Account') [${account:-default}]: "
+  read_tty reply
+  CRED_ACCOUNT="${reply:-${account:-default}}"
+  ask "$(t 'User' 'User') [${user:-default}]: "
+  read_tty reply
+  CRED_USER="${reply:-${user:-default}}"
+}
+
 check_server() {
-  local key def
-  command -v curl >/dev/null 2>&1 || return 0
+  local key def old_url account user
+  if ! command -v curl >/dev/null 2>&1; then
+    if is_loopback_url "$CRED_URL"; then
+      [ -n "$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")" ] || CRED_ACCOUNT="default"
+      [ -n "$(cred_value "$CRED_USER" "$CUR_USER")" ] || CRED_USER="default"
+    else
+      account="$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")"
+      user="$(cred_value "$CRED_USER" "$CUR_USER")"
+      if [ -z "$account" ] || [ -z "$user" ]; then
+        err "$(t 'curl is unavailable, so the remote server authentication mode cannot be detected. Install curl, or pass both --account and --user for Trusted mode.' '未安装 curl，无法检测远程服务认证模式。请安装 curl，或为 Trusted 模式同时传入 --account 和 --user。')"
+        exit 2
+      fi
+    fi
+    return 0
+  fi
   while :; do
     key="$(cred_value "$CRED_KEY" "$CUR_KEY")"
     probe_server "$CRED_URL" "$key" "$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")" "$(cred_value "$CRED_USER" "$CUR_USER")"
+    [ -z "$PROBE_AUTH_MODE" ] || CRED_AUTH_MODE="$PROBE_AUTH_MODE"
+    if [ "$PROBE_RESULT" != "unreachable" ]; then
+      resolve_unknown_remote_auth_mode
+    fi
+    if [ "$PROBE_AUTH_MODE" = "api_key" ]; then
+      CRED_ACCOUNT=""
+      CRED_USER=""
+    fi
+    if [ "$PROBE_AUTH_MODE" = "trusted" ]; then
+      ensure_trusted_identity
+      probe_server "$CRED_URL" "$key" "$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")" "$(cred_value "$CRED_USER" "$CUR_USER")"
+    fi
     def=0
     case "$PROBE_RESULT" in
       ok)
@@ -1458,6 +1565,26 @@ check_server() {
         ;;
       unreachable)
         # Usual for a local server that has not been started yet.
+        if is_loopback_url "$CRED_URL"; then
+          [ -n "$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")" ] || CRED_ACCOUNT="default"
+          [ -n "$(cred_value "$CRED_USER" "$CUR_USER")" ] || CRED_USER="default"
+        elif [ "$PROBE_AUTH_MODE" = "trusted" ]; then
+          ensure_trusted_identity
+        elif [ -z "$PROBE_AUTH_MODE" ] && { [ -z "$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")" ] || [ -z "$(cred_value "$CRED_USER" "$CUR_USER")" ]; }; then
+          if [ "$INTERACTIVE" -eq 1 ]; then
+            tui_menu "$(t 'Server authentication mode could not be detected.' '无法检测服务认证模式。')" 0 \
+              "$(t 'API Key' 'API Key')" \
+              "$(t 'Trusted (requires account and user)' 'Trusted（需要 account 和 user）')"
+            if [ "$TUI_MENU_CHOICE" -eq 1 ]; then
+              CRED_AUTH_MODE="trusted"
+              PROBE_AUTH_MODE="trusted"
+              ensure_trusted_identity
+            fi
+          else
+            err "$(t 'Cannot determine the remote server authentication mode while it is unreachable. Start the server, or pass both --account and --user for Trusted mode.' '远程服务不可达，无法确定认证模式。请先启动服务，或为 Trusted 模式同时传入 --account 和 --user。')"
+            exit 2
+          fi
+        fi
         warn "$(t "Cannot reach $CRED_URL. If the server is not running yet, start it before using the plugin." "无法连接 ${CRED_URL}。如果服务还没启动，请在使用插件前启动它。")"
         def=1
         ;;
@@ -1467,11 +1594,21 @@ check_server() {
     esac
     [ "$INTERACTIVE" -eq 1 ] || return 0
     tui_menu "$(t 'What next?' '接下来怎么做？')" "$def" \
-      "$(t 'Re-enter server URL and API key' '重新输入服务地址和 API key')" \
+      "$(t 'Re-enter server URL and credentials' '重新输入服务地址和凭据')" \
       "$(t 'Continue anyway' '仍然继续')"
     [ "$TUI_MENU_CHOICE" -eq 0 ] || return 0
+    old_url="$CRED_URL"
+    if [ "$PROBE_AUTH_MODE" = "trusted" ]; then
+      CRED_ACCOUNT=""
+      CRED_USER=""
+    fi
     prompt_connection "$CRED_URL" "$key"
     CRED_URL="$WIZ_URL"
+    if [ "$CRED_URL" != "$old_url" ]; then
+      CRED_AUTH_MODE=""
+      CRED_ACCOUNT=""
+      CRED_USER=""
+    fi
     [ "$WIZ_KEY" = "__OPENVIKING_KEEP__" ] || CRED_KEY="$WIZ_KEY"
   done
 }
