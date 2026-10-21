@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generic, List, Literal, Mapping, Optional, TypedDict, TypeVar, Union
+from typing import Any, Dict, Generic, List, Literal, Mapping, Optional, TypeVar, Union
+
+from typing_extensions import TypedDict
 
 ExtraFields = Mapping[str, Any]
 TargetURI = Union[str, List[str]]
