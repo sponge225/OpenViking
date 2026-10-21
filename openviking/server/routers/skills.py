@@ -155,11 +155,12 @@ async def _list_skills_page(
 ) -> tuple[list[Dict[str, Any]], bool]:
     """Page over valid skills after filtering raw directory entries."""
     skipped = 0
+    target_count = limit + 1
     results: list[Dict[str, Any]] = []
     for root_uri in root_uris:
         raw_offset = 0
         previous_signature: tuple[str, str, int] | None = None
-        while len(results) <= limit:
+        while len(results) < target_count:
             try:
                 page = await service.fs.ls(
                     root_uri,
@@ -205,7 +206,7 @@ async def _list_skills_page(
                     skipped += 1
                     continue
                 results.append(_skill_summary_from_entry(entry))
-                if len(results) > limit:
+                if len(results) == target_count:
                     return results[:limit], True
 
             if not page.has_more:

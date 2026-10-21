@@ -140,30 +140,18 @@ async def list_tasks(
     scope = page_scope(
         account=_ctx.account_id, user=_ctx.user.user_id, role=str(_ctx.role), **filters
     )
+    before = decode_cursor(cursor, scope)
+    list_kwargs = {
+        "account_id": _ctx.account_id,
+        "user_id": _ctx.user.user_id,
+        "limit": limit + 1,
+        "before": before,
+        **filters,
+    }
     list_call = (
-        tracker.list_root_tasks(
-            account_id=_ctx.account_id,
-            user_id=_ctx.user.user_id,
-            limit=limit + 1,
-            before=decode_cursor(cursor, scope),
-            task_type=task_type,
-            status=status_value,
-            resource_id=resource_id,
-            include_internal=include_internal,
-            q=q,
-        )
+        tracker.list_root_tasks(**list_kwargs)
         if _ctx.role == Role.ROOT
-        else tracker.list_tasks(
-            account_id=_ctx.account_id,
-            user_id=_ctx.user.user_id,
-            limit=limit + 1,
-            before=decode_cursor(cursor, scope),
-            task_type=task_type,
-            status=status_value,
-            resource_id=resource_id,
-            include_internal=include_internal,
-            q=q,
-        )
+        else tracker.list_tasks(**list_kwargs)
     )
     tasks = await list_call
     has_more = len(tasks) > limit

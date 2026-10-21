@@ -377,9 +377,10 @@ function normalizeKeyResult(value: unknown): KeyResult {
 export async function fetchAdminAccounts(
   connection: AdminConnection,
 ): Promise<AdminAccount[]> {
+  const client = createAdminClient(connection)
   const result = await fetchAllOffsetPages((offset) =>
     getAdminAccounts({
-      client: createAdminClient(connection),
+      client,
       query: { offset, limit: 200 },
     }),
   )
@@ -392,9 +393,10 @@ export async function fetchAdminUsers(
   connection: AdminConnection,
   accountId: string,
 ): Promise<AdminUser[]> {
+  const client = createAdminClient(connection)
   const result = await fetchAllOffsetPages((offset) =>
     getAdminAccountIdUsers({
-      client: createAdminClient(connection),
+      client,
       path: { account_id: accountId },
       query: { offset, limit: 200 },
     }),
@@ -409,8 +411,9 @@ export async function fetchAdminUserDirectory(
   connection: AdminConnection,
   accountId: string,
 ): Promise<AdminUser[]> {
+  const client = createAdminClient(connection)
   const result = await fetchAllOffsetPages((offset) =>
-    createAdminClient(connection).get({
+    client.get({
       url: '/api/v1/admin/accounts/{account_id}/users',
       path: { account_id: accountId },
       query: { include_credentials: false, offset, limit: 200 },
