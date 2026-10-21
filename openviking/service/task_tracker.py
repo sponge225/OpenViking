@@ -35,6 +35,7 @@ from openviking.service.task_domain import (
     TERMINAL_WORK_STATES,
     DeleteExpiredResult,
     QueueWorkSummary,
+    TaskPatch,
     TaskRecord,
     TaskRetentionPolicy,
     TaskStatus,
@@ -449,42 +450,19 @@ class TaskTracker:
     ) -> None:
         await self._store.start_task(task_id, stage=stage, account_id=account_id, user_id=user_id)
 
-    async def update_stage(
+    async def patch_task(
         self,
         task_id: str,
-        stage: str,
-        account_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        *,
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        await self._store.update_stage(
-            task_id, stage, meta=meta, account_id=account_id, user_id=user_id
-        )
-
-    async def update_task_auth(
-        self,
-        task_id: str,
-        values: Dict[str, Any],
+        patch: TaskPatch,
         *,
         account_id: str,
         user_id: str,
-    ) -> None:
+    ) -> StoreOperationResult:
+        """Atomically apply permitted Task fields without changing task state."""
         self._validate_owner(account_id, user_id)
-        await self._store.update_auth(task_id, values, account_id=account_id, user_id=user_id)
-
-    async def record_feishu_response(
-        self,
-        task_id: str,
-        entry: str,
-        response_id: str,
-        account_id: str,
-        user_id: str,
-    ) -> None:
-        self._validate_owner(account_id, user_id)
-        await self._store.merge_meta(
+        return await self._store.patch_task(
             task_id,
-            {"feishu_responses": {entry: response_id}},
+            patch,
             account_id=account_id,
             user_id=user_id,
         )
@@ -1164,21 +1142,6 @@ class TaskTracker:
                     poll_interval if remaining is None else min(poll_interval, remaining)
                 )
 
-    async def mark_enqueue_complete(
-        self,
-        task_id: str,
-        work_id: str,
-        *,
-        account_id: str,
-        user_id: str,
-    ) -> None:
-        await self._store.mark_enqueue_complete(
-            task_id,
-            work_id,
-            account_id=account_id,
-            user_id=user_id,
-        )
-
     async def is_enqueue_complete(
         self,
         task_id: str,
@@ -1187,12 +1150,8 @@ class TaskTracker:
         account_id: str,
         user_id: str,
     ) -> bool:
-        return await self._store.is_enqueue_complete(
-            task_id,
-            work_id,
-            account_id=account_id,
-            user_id=user_id,
-        )
+        auth = await self.get_task_auth(task_id, account_id=account_id, user_id=user_id)
+        return work_id in set(auth.get("enqueue_complete_work_ids") or ())
 
     async def build_queue_status(
         self,

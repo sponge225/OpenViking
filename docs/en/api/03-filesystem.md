@@ -71,6 +71,8 @@ discoverable-name behavior applies only to the shared
 `viking://resources` namespace; private user and peer namespaces retain their
 existing hiding rules.
 
+On case-insensitive `localfs`, directory name aliases that differ only by case may affect what `ls`, `tree`, and `glob` can see. For example, if the real directory is `viking://resources/bob-private/`, a request for `viking://resources/BOB-PRIVATE/` may list the same directory; on case-sensitive systems, the alias directory returns `NOT_FOUND` when it does not exist.
+
 
 **Python SDK (HTTP)**
 
@@ -403,6 +405,8 @@ The `id` field (files only) is the deterministic vector record primary key in Vi
 
 The `count` field (directories only) contains the estimated number of items (files and subdirectories) under this directory (from vector index).
 
+On case-insensitive `localfs`, `stat` may also return metadata for a real file or directory through a case-only alias. For example, `viking://resources/docs/REPORT.md` may hit the real `viking://resources/docs/report.md`; on case-sensitive systems, the alias target returns `NOT_FOUND` when it does not exist.
+
 ---
 
 ### attrs()
@@ -579,6 +583,8 @@ ov mkdir viking://resources/new-project/ --description "API docs directory"
 }
 ```
 
+On case-insensitive `localfs`, creating a directory that differs only by case may hit an existing directory. For example, if `viking://resources/docs/` already exists, `ov mkdir viking://resources/DOCS/` may act on the same underlying directory; on case-sensitive systems, they are separate paths.
+
 ---
 
 ### rm()
@@ -674,6 +680,8 @@ The `estimated_deleted_count` field (for recursive deletes) contains the estimat
 
 When deleting `viking://resources/...`, the response may include `memory_cleanup`, indicating that user memories referencing that resource URI were cleaned up before deletion.
 
+On case-insensitive `localfs`, case-only aliases may affect the delete target. For example, if the real file is `viking://resources/bob-private/private.md`, `ov rm viking://resources/BOB-PRIVATE/private.md` may delete the same file; on case-sensitive systems, deleting the missing alias path still succeeds because `rm` is idempotent, but it does not delete the real file.
+
 ---
 
 ### cp()
@@ -760,6 +768,8 @@ ov cp -r viking://resources/docs viking://resources/docs-backup
 
 Common errors include `NOT_FOUND` when the source or destination parent is missing, `CONFLICT` when a path lock is busy, and `INVALID_ARGUMENT` (HTTP 400) when a directory is copied or removed without `recursive=true`, a directory operation targets a file, or the source/destination relationship or file/directory types are invalid.
 
+On case-insensitive `localfs`, both `from_uri` and `to_uri` may be affected by case-only aliases. For example, `ov cp viking://resources/BOB-PRIVATE/private.md viking://resources/archive/copy.md` may copy from the real `bob-private/private.md`; a `to_uri` that differs only by case may also overwrite an existing target. On case-sensitive systems, a differently cased missing source returns `NOT_FOUND`, and a differently cased target is a separate path.
+
 ---
 
 ### mv()
@@ -836,6 +846,8 @@ ov mv viking://resources/old-name/ viking://resources/new-name/
   }
 }
 ```
+
+On case-insensitive `localfs`, both `from_uri` and `to_uri` may be affected by case-only aliases. For example, `ov mv viking://resources/BOB-PRIVATE/private.md viking://resources/archive/private.md` may move the real `bob-private/private.md`; a `to_uri` that differs only by case may also overwrite or merge into an existing target. On case-sensitive systems, a differently cased missing source returns `NOT_FOUND`, and a differently cased target is a separate path.
 
 <a id="grep"></a><a id="glob"></a>
 

@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol
 from uuid import uuid4
 
 from openviking.server.identity import RequestContext
+from openviking.service.task_domain import TaskPatch
 from openviking.service.task_tracker import TaskRecord, TaskStatus, get_task_tracker
 from openviking.service.task_tracker_concurrency import (
     KeyedAsyncLockPool,
@@ -226,9 +227,9 @@ class ExternalTaskService:
             return task
         enqueued = False
         try:
-            await tracker.update_stage(
+            await tracker.patch_task(
                 task.task_id,
-                "queued",
+                TaskPatch(stage="queued"),
                 account_id=ctx.account_id,
                 user_id=ctx.user.user_id,
             )
@@ -384,9 +385,9 @@ class ExternalTaskService:
                     poll_interval=provider.poll_interval_seconds,
                     max_attempts=provider.poll_max_attempts,
                 )
-                await tracker.update_task_auth(
+                await tracker.patch_task(
                     task_id,
-                    {"external_task_id": external_task_id},
+                    TaskPatch(auth={"external_task_id": external_task_id}),
                     account_id=account_id,
                     user_id=user_id,
                 )
@@ -484,12 +485,11 @@ class ExternalTaskService:
                     key not in task.meta or task.meta[key] != value for key, value in meta.items()
                 )
             ):
-                await tracker.update_stage(
+                await tracker.patch_task(
                     task_id,
-                    stage,
+                    TaskPatch(stage=stage, meta=meta),
                     account_id=account_id,
                     user_id=user_id,
-                    meta=meta,
                 )
         if snapshot.status in _ACTIVE_STATUSES:
             return False
@@ -557,9 +557,9 @@ class ExternalTaskService:
                         poll_interval=provider.poll_interval_seconds,
                         max_attempts=max_attempts,
                     )
-                    await get_task_tracker().update_task_auth(
+                    await get_task_tracker().patch_task(
                         ov_task_id,
-                        {"external_task_id": external_task_id},
+                        TaskPatch(auth={"external_task_id": external_task_id}),
                         account_id=account_id,
                         user_id=user_id,
                     )

@@ -2,6 +2,7 @@
 
 import asyncio
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,8 +11,9 @@ from vikingbot.compile import review
 from vikingbot.compile.models import CompileLimits
 from vikingbot.compile.pipeline_io import JsonModel, ModelCallLimitError
 from vikingbot.compile.plan import Contract, Node, ReviewDecision
+from vikingbot.compile.sandbox import CompileSandboxManager, _CompileSandbox
 from vikingbot.compile.service import BotCompileService
-from vikingbot.config.schema import Config
+from vikingbot.config.schema import Config, SessionKey
 from vikingbot.providers.base import LLMResponse, ToolCallRequest
 
 
@@ -104,3 +106,30 @@ async def test_direct_reads_stop_repetition_but_allow_progress(case):
             await result
     assert provider.chat.await_count == (len(offsets) + 1 if case == "progress" else 4)
     assert provider.chat.await_args.kwargs["thinking"] is False
+
+
+def test_compile_workspace_root_is_absolute_for_relative_storage(tmp_path, monkeypatch):
+    """A relative storage.workspace must not reach sandbox subprocess paths (#6376)."""
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    monkeypatch.chdir(state_root)
+    config = Config(storage_workspace="data")
+    config.ov_server.set_effective_auth_mode("dev")
+    manager = CompileSandboxManager(
+        config,
+        config.bot_data_path / "compile_workspaces" / "task-1",
+        config.workspace_path,
+        connection={},
+    )
+    expected = (state_root / "data" / "bot" / "compile_workspaces" / "task-1").resolve()
+    assert manager.workspace == expected
+
+    # The credentials path is injected into sandbox shell commands, whose working
+    # directory is the workspace itself; a relative path would resolve twice.
+    workspace = manager.get_workspace_path(
+        SessionKey(type="compile", channel_id="task-1", chat_id="task-1")
+    )
+    sandbox = _CompileSandbox(SimpleNamespace(sandbox_cwd=str(workspace)))
+    config_path = Path(sandbox._config_path)
+    assert config_path.is_absolute()
+    assert config_path.is_relative_to(manager.workspace)

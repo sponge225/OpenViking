@@ -33,6 +33,7 @@ from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.expr import And, Eq, PathScope
 from openviking.storage.index_action import FieldPatch
 from openviking.storage.internal_names import is_storage_internal_name
+from openviking.storage.pathlock_transfer import PathLockGuard
 from openviking.storage.queuefs.semantic_processor import SemanticProcessor
 from openviking.storage.resource_rnfv import RequestIntent
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
@@ -1300,18 +1301,27 @@ class ResourceProcessor:
 
                 if should_summarize:
                     try:
-                        summary_result = await (await self._summarizer_for(ctx)).summarize(
-                            resource_uris=[root_uri],
-                            ctx=ctx,
-                            skip_vectorization=not build_index,
-                            lock=resource_lock,
-                            temp_uris=[temp_uri],
-                            is_code_repo=bool(prepared.get("is_code_repo")),
-                            ingest_options=ingest_options,
-                            semantic_source=semantic_source,
-                            generation_trigger="resource_ingest",
-                            semantic_plan=semantic_plan,
+                        summary_guard = (
+                            PathLockGuard(get_viking_fs()._async_agfs, resource_lock)
+                            if resource_lock is not None
+                            else None
                         )
+                        try:
+                            summary_result = await (await self._summarizer_for(ctx)).summarize(
+                                resource_uris=[root_uri],
+                                ctx=ctx,
+                                skip_vectorization=not build_index,
+                                lock=summary_guard,
+                                temp_uris=[temp_uri],
+                                is_code_repo=bool(prepared.get("is_code_repo")),
+                                ingest_options=ingest_options,
+                                semantic_source=semantic_source,
+                                generation_trigger="resource_ingest",
+                                semantic_plan=semantic_plan,
+                            )
+                        finally:
+                            if summary_guard is not None:
+                                resource_lock = summary_guard.lease
                         if semantic_plan is not None and summary_result.get("status") != "success":
                             raise RuntimeError(
                                 str(summary_result.get("message") or "semantic plan enqueue failed")
@@ -1321,7 +1331,14 @@ class ResourceProcessor:
                             and summary_result.get("status") == "success"
                             and summary_result.get("enqueued_count", 0) > 0
                         ):
-                            await get_viking_fs()._async_agfs.pathlock_handoff(resource_lock)
+                            if (
+                                not summary_result.get("lock_handed_off", False)
+                                and summary_guard is not None
+                            ):
+                                try:
+                                    await summary_guard.handoff()
+                                finally:
+                                    resource_lock = summary_guard.lease
                             resource_lock = None
                         if semantic_plan is not None and (
                             summary_result.get("status") == "success"

@@ -16,6 +16,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -66,7 +67,9 @@ from openviking.server.user_config import (
     effective_resource_add_target,
     effective_skill_add_target,
 )
+from openviking.service.task_domain import TaskPatch
 from openviking.storage.acl import AclAction, AclSpec
+from openviking.storage.pathlock_transfer import PathLockGuard
 from openviking.storage.queuefs import QueueManager, get_queue_manager
 from openviking.storage.queuefs.add_resource_msg import AddResourcePhase
 from openviking.storage.viking_fs import LS_ALL_NODES, VikingFS
@@ -582,7 +585,7 @@ class ResourceService:
             return None
         async_agfs = getattr(self._viking_fs, "_async_agfs", None)
         if async_agfs is not None:
-            return await async_agfs.pathlock_to_handoff(lock_ref)
+            return await PathLockGuard(async_agfs, lock_ref).to_handoff()
         to_handoff = getattr(lock_ref, "to_handoff", None)
         if callable(to_handoff):
             handoff = to_handoff()
@@ -602,6 +605,17 @@ class ResourceService:
             result = handoff()
             if inspect.isawaitable(result):
                 await result
+
+    async def _adopt_lock_ref(self, handoff_ref: Any) -> Any:
+        """Recover ownership from a handoff after enqueue fails."""
+        async_agfs = getattr(self._viking_fs, "_async_agfs", None)
+        if async_agfs is not None:
+            return await async_agfs.pathlock_adopt(handoff_ref)
+        adopt = getattr(handoff_ref, "adopt", None)
+        if callable(adopt):
+            result = adopt()
+            return await result if inspect.isawaitable(result) else result
+        raise RuntimeError("Lock handoff cannot be adopted")
 
     async def _release_lock_ref(self, lock_ref: Any) -> None:
         """Release either a native pathlock ref or legacy lease."""
@@ -706,6 +720,12 @@ class ResourceService:
         tracker = get_task_tracker()
         task = None
         enqueued = False
+        lock_ops = getattr(self._viking_fs, "_async_agfs", None) or SimpleNamespace(
+            pathlock_handoff=self._handoff_lock_ref,
+            pathlock_adopt=self._adopt_lock_ref,
+            pathlock_release=self._release_lock_ref,
+        )
+        lock_guard = PathLockGuard(lock_ops, resource_lock)
         try:
             task = await tracker.create(
                 "add_resource",
@@ -720,25 +740,33 @@ class ResourceService:
             )
             task_account_id = getattr(task, "account_id", msg.account_id)
             task_user_id = getattr(task, "user_id", msg.user_id)
-            with bind_task_context(task.task_id, task_account_id, task_user_id):
-                await get_queue_manager().enqueue(queue_name, msg.to_dict())
-            enqueued = True
-            if on_enqueued is not None:
-                on_enqueued()
+
+            async def dispatch() -> str:
+                nonlocal enqueued
+                with bind_task_context(task.task_id, task_account_id, task_user_id):
+                    result = await get_queue_manager().enqueue(queue_name, msg.to_dict())
+                enqueued = True
+                if on_enqueued is not None:
+                    on_enqueued()
+                return result
+
             if resource_lock is not None:
-                await self._handoff_lock_ref(resource_lock)
-                resource_lock = None
-            await tracker.update_stage(
+                await lock_guard.handoff_and_dispatch(msg.lock_handoff, dispatch)
+            else:
+                await dispatch()
+            await tracker.patch_task(
                 task.task_id,
-                "queued",
+                TaskPatch(stage="queued"),
                 account_id=msg.account_id,
                 user_id=msg.user_id,
             )
         except BaseException:
-            if resource_lock is not None:
-                if on_failed_with_lock is not None:
-                    await on_failed_with_lock(resource_lock)
-                await self._release_lock_ref(resource_lock)
+            if lock_guard.lease is not None:
+                try:
+                    if on_failed_with_lock is not None:
+                        await on_failed_with_lock(lock_guard.lease)
+                finally:
+                    await lock_guard.close()
             if task is not None and not enqueued:
                 await tracker.fail(
                     task.task_id,
@@ -809,8 +837,11 @@ class ResourceService:
                 saved = dict(task.meta.get("feishu_responses", {})) if task else {}
 
                 async def save_response(entry: str, response_id: str) -> None:
-                    await tracker.record_feishu_response(
-                        msg.task_id, entry, response_id, ctx.account_id, ctx.user.user_id
+                    await tracker.patch_task(
+                        msg.task_id,
+                        TaskPatch(meta={"feishu_responses": {entry: response_id}}),
+                        account_id=ctx.account_id,
+                        user_id=ctx.user.user_id,
                     )
                     saved[entry] = response_id
 
@@ -2069,6 +2100,9 @@ class ResourceService:
             code = task.result.get("code")
             if isinstance(code, str) and code:
                 failure["code"] = code
+            details = task.result.get("details")
+            if isinstance(details, dict):
+                failure["details"] = details
         return failure
 
     async def _execute_resource_ingestion(

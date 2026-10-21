@@ -35,6 +35,7 @@ from openviking.storage.acl import AclManager
 from openviking.storage.collection_schemas import init_context_collection
 from openviking.storage.index_consistency import check_index_consistency
 from openviking.storage.queuefs.add_resource_processor import AddResourceProcessor
+from openviking.storage.queuefs.content_write_processor import ContentWriteProcessor
 from openviking.storage.queuefs.external_task_processor import ExternalTaskProcessor
 from openviking.storage.queuefs.queue_manager import QueueManager, init_queue_manager
 from openviking.storage.queuefs.reindex_processor import ReindexProcessor
@@ -639,6 +640,11 @@ class OpenVikingService:
             self._queue_manager.get_queue(
                 self._queue_manager.REINDEX,
                 dequeue_handler=ReindexProcessor(self._viking_fs),
+                allow_create=True,
+            )
+            self._queue_manager.get_queue(
+                self._queue_manager.CONTENT_WRITE,
+                dequeue_handler=ContentWriteProcessor(self._viking_fs, self._vikingdb_manager),
                 allow_create=True,
             )
             self._queue_manager.get_queue(

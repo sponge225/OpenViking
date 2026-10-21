@@ -11,7 +11,7 @@ import pytest
 from openviking.server.identity import RequestContext, Role
 from openviking.server.routers.tasks import TaskListItem
 from openviking.service.external_task_service import ExternalTaskService
-from openviking.service.task_domain import TaskRecord
+from openviking.service.task_domain import TaskPatch, TaskRecord
 from openviking.service.task_pagination import decode_cursor, encode_cursor, page_scope
 from openviking.service.task_store import PersistentTaskStore
 from openviking.service.task_tracker import TaskStatus, TaskTracker
@@ -122,7 +122,11 @@ async def test_concurrent_submission_retry_and_restart(monkeypatch):
 
         owner = {"account_id": ctx.account_id, "user_id": ctx.user.user_id}
         await tracker.start(again.task_id, stage="polling", **owner)
-        await tracker.update_task_auth(again.task_id, {"external_task_id": "submitted"}, **owner)
+        await tracker.patch_task(
+            again.task_id,
+            TaskPatch(auth={"external_task_id": "submitted"}),
+            **owner,
+        )
         tracker = TaskTracker(PersistentTaskStore(agfs))
         service = ExternalTaskService()
         service.register(provider)

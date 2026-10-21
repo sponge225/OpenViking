@@ -526,7 +526,7 @@ async def test_reindex_executor_passes_tags_to_background_run(monkeypatch):
         async def create_if_no_running(self, *args, **kwargs):
             return FakeTask()
 
-        update_stage = AsyncMock()
+        patch_task = AsyncMock()
         fail = AsyncMock()
 
     class FakeAGFS:
@@ -950,7 +950,8 @@ async def test_reindex_rfv_enqueues_semantic_plan_without_snapshot_source_bytes(
     )
 
     assert calls == ["to_handoff", "handoff", "enqueue"]
-    assert run.lease_handed_off is True
+    assert run.lease is None
+    assert run.lock is None
     assert queue.message.plan == plan
     assert queue.message.propagate_to_parent is False
     assert queue.message.generation_trigger == "reindex"

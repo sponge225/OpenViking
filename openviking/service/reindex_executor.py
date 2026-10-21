@@ -27,10 +27,12 @@ from openviking.core.namespace import (
 )
 from openviking.server.dependencies import get_service
 from openviking.server.identity import RequestContext
+from openviking.service.task_domain import TaskPatch
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
 from openviking.service.task_work_index import bind_task_context, get_task_context
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.storage.abstract_overview import body_for_preview, embedding_text_for_body
+from openviking.storage.pathlock_transfer import PathLockGuard
 from openviking.storage.queuefs.embedding_msg_converter import EmbeddingMsgConverter
 from openviking.storage.queuefs.semantic_msg import SemanticMsg
 from openviking.storage.queuefs.semantic_processor import SemanticProcessor
@@ -113,7 +115,7 @@ class _ReindexRunContext:
     counters: _ReindexCounters
     lock: dict | None = None
     lease: dict | None = None
-    lease_handed_off: bool = False
+    lease_guard: PathLockGuard | None = None
     lock_root_uri: str | None = None
     ingest_options: IngestOptions | None = None
     force: bool = False
@@ -235,7 +237,7 @@ class ReindexExecutor:
         from openviking.storage.queuefs.reindex_msg import ReindexMsg
 
         service = None
-        lease = None
+        lock_guard = None
         enqueued = False
         try:
             service = get_service()
@@ -247,7 +249,8 @@ class ReindexExecutor:
                 else service.viking_fs._async_agfs.pathlock_acquire_exact
             )
             lease = await acquire(path)
-            handoff = await service.viking_fs._async_agfs.pathlock_to_handoff(lease)
+            lock_guard = PathLockGuard(service.viking_fs._async_agfs, lease)
+            handoff = await lock_guard.to_handoff()
             msg = ReindexMsg(
                 task_id=task.task_id,
                 uri=uri,
@@ -267,17 +270,24 @@ class ReindexExecutor:
                 lock_handoff=handoff,
             )
             queue_manager = get_queue_manager()
-            with bind_task_context(task.task_id, ctx.account_id, ctx.user.user_id):
-                await queue_manager.enqueue(queue_manager.REINDEX, msg.to_dict())
-            enqueued = True
-            await service.viking_fs._async_agfs.pathlock_handoff(lease)
-            lease = None
-            await tracker.update_stage(
-                task.task_id, "queued", account_id=ctx.account_id, user_id=ctx.user.user_id
+
+            async def dispatch() -> str:
+                nonlocal enqueued
+                with bind_task_context(task.task_id, ctx.account_id, ctx.user.user_id):
+                    result = await queue_manager.enqueue(queue_manager.REINDEX, msg.to_dict())
+                enqueued = True
+                return result
+
+            await lock_guard.handoff_and_dispatch(handoff, dispatch)
+            await tracker.patch_task(
+                task.task_id,
+                TaskPatch(stage="queued"),
+                account_id=ctx.account_id,
+                user_id=ctx.user.user_id,
             )
         except BaseException:
-            if lease is not None and service is not None:
-                await service.viking_fs._async_agfs.pathlock_release(lease)
+            if lock_guard is not None:
+                await lock_guard.close()
             if not enqueued:
                 await tracker.fail(
                     task.task_id,
@@ -605,6 +615,7 @@ class ReindexExecutor:
         if not root_is_dir:
             acquire_lock = service.viking_fs._async_agfs.pathlock_acquire_exact
         lease = existing_lease or await acquire_lock(path)
+        lease_guard = PathLockGuard(service.viking_fs._async_agfs, lease)
         run: _ReindexRunContext | None = None
         try:
             borrowed = (
@@ -617,6 +628,7 @@ class ReindexExecutor:
                 counters=counters,
                 lock=borrowed,
                 lease=lease,
+                lease_guard=lease_guard,
                 ingest_options=ingest_options,
                 force=force,
                 root_is_dir=root_is_dir,
@@ -673,9 +685,7 @@ class ReindexExecutor:
                     await get_task_tracker().build_queue_status(task_context.task_id),
                 )
         finally:
-            active_lease = run.lease if run is not None else lease
-            if active_lease is not None and (run is None or not run.lease_handed_off):
-                await service.viking_fs._async_agfs.pathlock_release(active_lease)
+            await lease_guard.close()
 
         return {
             "status": "completed",
@@ -900,35 +910,34 @@ class ReindexExecutor:
             )
             acquired_plan_lease = True
         assert plan_lease is not None
-        handoff = await agfs.pathlock_to_handoff(plan_lease)
-        handed_off = False
+        plan_guard = (
+            run.lease_guard
+            if not acquired_plan_lease and run.lease_guard is not None
+            else PathLockGuard(agfs, plan_lease)
+        )
+        handoff = await plan_guard.to_handoff()
+        msg.lock_handoff = handoff
         try:
-            await agfs.pathlock_handoff(plan_lease)
-            handed_off = True
-            msg.lock_handoff = handoff
-            enqueue_id = await semantic_queue.enqueue(msg)
+            enqueue_id = await plan_guard.handoff_and_dispatch(
+                handoff,
+                lambda: semantic_queue.enqueue(msg),
+                accepted=lambda result: result != "deduplicated",
+            )
             if enqueue_id == "deduplicated":
-                lock = await agfs.pathlock_adopt(handoff)
-                await agfs.pathlock_release(lock)
+                await plan_guard.close()
                 if not acquired_plan_lease:
-                    run.lease_handed_off = True
                     run.lease = None
                     run.lock = None
                 return
             if not acquired_plan_lease:
-                run.lease_handed_off = True
                 run.lease = None
                 run.lock = None
         except BaseException:
-            if handed_off:
-                recovered_lease = await agfs.pathlock_adopt(handoff)
-                if acquired_plan_lease:
-                    await agfs.pathlock_release(recovered_lease)
-                else:
-                    run.lease = recovered_lease
-                    run.lock = await agfs.pathlock_as_borrowed(run.lease)
-            elif acquired_plan_lease:
-                await agfs.pathlock_release(plan_lease)
+            if acquired_plan_lease:
+                await plan_guard.close()
+            elif plan_guard.lease is not None:
+                run.lease = plan_guard.lease
+                run.lock = await agfs.pathlock_as_borrowed(run.lease)
             raise
 
     async def _reindex_skill(

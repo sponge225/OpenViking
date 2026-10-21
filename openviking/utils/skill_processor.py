@@ -29,6 +29,7 @@ from openviking.privacy.skill_extractor import extract_skill_privacy_values
 from openviking.server.identity import RequestContext
 from openviking.server.local_input_guard import deny_direct_local_skill_input
 from openviking.service.task_tracker_concurrency import run_to_completion
+from openviking.storage.pathlock_transfer import PathLockGuard
 from openviking.storage.viking_fs import VikingFS
 from openviking.storage.vikingdb_manager import VikingDBManager
 from openviking.telemetry import get_current_telemetry, register_telemetry
@@ -747,6 +748,7 @@ class SkillProcessor:
 
         telemetry = get_current_telemetry()
         register_telemetry(telemetry)
+        lock_guard = PathLockGuard(viking_fs._async_agfs, lease)
         msg = SemanticMsg(
             uri=uri,
             context_type="skill",
@@ -756,24 +758,17 @@ class SkillProcessor:
             group_ids=ctx.group_ids,
             role=str(ctx.role),
             telemetry_id=telemetry.telemetry_id,
-            lock_handoff=await viking_fs._async_agfs.pathlock_to_handoff(lease),
+            lock_handoff=await lock_guard.to_handoff(),
             generation_trigger="skill_ingest",
             propagate_to_parent=False,
             source={"path": source_path},
         )
-        handed_off = False
         try:
             queue_manager = get_queue_manager()
-            # Consumers, including cancelled-message cleanup, must never see
-            # a handoff that the producer has not made ready yet.
-            await viking_fs._async_agfs.pathlock_handoff(lease)
-            handed_off = True
-            await queue_manager.get_queue(queue_manager.SEMANTIC, allow_create=True).enqueue(msg)
+            queue = queue_manager.get_queue(queue_manager.SEMANTIC, allow_create=True)
+            await lock_guard.handoff_and_dispatch(msg.lock_handoff, lambda: queue.enqueue(msg))
         except BaseException:
-            if handed_off:
-                # Enqueue was rejected/failed. Return ownership to the caller's
-                # finally block; adopting creates a new owned lease reference.
-                reclaimed = await viking_fs._async_agfs.pathlock_adopt(msg.lock_handoff)
+            if lock_guard.lease is not None and lock_guard.lease is not lease:
                 lease.clear()
-                lease.update(reclaimed)
+                lease.update(lock_guard.lease)
             raise
