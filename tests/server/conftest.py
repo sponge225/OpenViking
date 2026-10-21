@@ -204,11 +204,11 @@ async def service(temp_dir: Path, monkeypatch):
 
 @pytest_asyncio.fixture(scope="function")
 async def app(service: OpenVikingService):
-    """Create FastAPI app with pre-initialized service (no auth)."""
+    """Create an app with valid startup config and a fixed test identity."""
     from openviking.server.dependencies import set_service
     from tests.server.auth_test_utils import FixedIdentityAuthPlugin
 
-    config = ServerConfig()
+    config = ServerConfig(root_api_key=SDK_ROOT_API_KEY)
     fastapi_app = create_app(config=config, service=service)
     # ASGITransport doesn't trigger lifespan, so wire up the service manually
     set_service(service)

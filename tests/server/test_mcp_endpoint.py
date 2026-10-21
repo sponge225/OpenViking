@@ -115,7 +115,10 @@ async def test_privacy_tools_describe_placeholder_resolution_and_permissions():
     assert tools["privacy_upsert"].inputSchema["properties"]["values"]["type"] == "object"
 
 
-async def test_privacy_tools_merge_discover_and_resolve_without_echoing_saved_values(client):
+async def test_privacy_tools_merge_discover_and_resolve_without_echoing_saved_values(client, app):
+    app.state.auth_plugin = FixedIdentityAuthPlugin(
+        account_id=DEFAULT_CTX.account_id, user_id=DEFAULT_CTX.user.user_id
+    )
     secrets = ["pat-original-marker", "pat-updated-marker", "username-private-marker"]
     saved = await mcp_endpoint.mcp.call_tool(
         "privacy_upsert",
@@ -2659,7 +2662,7 @@ def test_mcp_route_unmatched_paths_keep_falling_back(app):
 
 
 async def test_mcp_middleware_stamps_and_uses_root_identity_for_home_alias():
-    """Identity resolved from the auth headers must be stamped onto the outer
+    """Identity resolved by the auth plugin must be stamped onto the outer
     request's root span attributes, so MCP traffic is audited under the real
     account/user instead of ``__unknown__``."""
     from openviking.telemetry.span_models import RootSpanAttributes
@@ -2688,7 +2691,7 @@ async def test_mcp_middleware_stamps_and_uses_root_identity_for_home_alias():
 
     app = FastAPI()
     app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: "test_fixed_identity")
-    app.state.auth_plugin = FixedIdentityAuthPlugin()
+    app.state.auth_plugin = FixedIdentityAuthPlugin(account_id="acct-1", user_id="user-1")
     app.routes.append(Route("/mcp", endpoint=_IdentityASGIMiddleware(downstream), methods=["POST"]))
 
     async def seed_root_span(scope, receive, send):

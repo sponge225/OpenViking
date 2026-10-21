@@ -28,8 +28,8 @@ from openviking.service.task_tracker import TaskRecord, TaskStatus, TaskTracker
 from openviking.storage.queuefs import QueueManager
 from openviking.storage.queuefs.external_task_processor import ExternalTaskProcessor
 from openviking_cli.session.user_id import UserIdentifier
-from tests.server.auth_test_utils import FixedIdentityAuthPlugin
 from openviking_cli.utils.config.open_viking_config import CompileApiConfig
+from tests.server.auth_test_utils import FixedIdentityAuthPlugin
 from tests.utils.mock_agfs import MockLocalAGFS
 
 
@@ -89,6 +89,7 @@ async def test_feedback_proxy_forwards_request(monkeypatch):
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/bot/v1/feedback",
+            headers={"X-API-Key": "active-user-key"},
             json={
                 "session_id": "session-1",
                 "response_id": "resp-123",
@@ -100,6 +101,7 @@ async def test_feedback_proxy_forwards_request(monkeypatch):
     assert response.json() == {"accepted": True, "response_id": "resp-123"}
     assert forwarded["url"] == "http://127.0.0.1:18790/bot/v1/feedback"
     assert forwarded["json"]["response_id"] == "resp-123"
+    assert forwarded["json"]["openviking_connection"]["api_key"] == "active-user-key"
     assert forwarded["headers"]["X-Gateway-Token"] == "gateway-secret"
     assert forwarded["timeout"] == 30.0
 
@@ -263,7 +265,20 @@ async def test_chat_proxy_attaches_authenticated_openviking_connection(monkeypat
                 "X-OpenViking-Account": "acct",
                 "X-OpenViking-User": "alice",
             },
-            json={"message": "hello", "user_id": "ignored-by-proxy-identity"},
+            json={
+                "message": "hello",
+                "user_id": "ignored-by-proxy-identity",
+                "openviking_connection": {
+                    "account_id": "forged-acct",
+                    "user_id": "forged-user",
+                    "actor_peer_id": "forged-peer",
+                    "agent_id": "forged-agent",
+                    "role": "root",
+                    "api_key_type": "root",
+                    "api_key": "forged-key",
+                    "server_url": "http://evil.example",
+                },
+            },
         )
 
     assert response.status_code == 200
@@ -755,13 +770,9 @@ async def test_compile_api_client_session_protocol_retry_and_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_chat_proxy_strips_client_openviking_connection_in_dev_mode(monkeypatch):
-    """Dev/no-API-key proxy must not forward a browser-supplied connection.
-
-    The Bot gateway trusts loopback openviking_connection from this proxy, so
-    leaving a client-claimed identity intact would let Studio forge account/user
-    /actor_peer on the --with-bot path (#4650 trust-model follow-up).
-    """
+@pytest.mark.parametrize("endpoint", ["/bot/v1/chat", "/bot/v1/chat/stream"])
+async def test_chat_proxy_requires_forwardable_api_key(monkeypatch, endpoint):
+    """Reject missing credentials even when the body claims a trusted identity."""
     forwarded = {}
 
     class FakeResponse:
@@ -785,6 +796,9 @@ async def test_chat_proxy_strips_client_openviking_connection_in_dev_mode(monkey
             forwarded["json"] = json
             return FakeResponse()
 
+        def stream(self, *args, **kwargs):
+            raise AssertionError("Missing credentials must not be forwarded")
+
     monkeypatch.setattr(bot_router_module, "BOT_API_URL", "http://127.0.0.1:18790")
     monkeypatch.setattr(bot_router_module, "BOT_API_KEY", "")
     monkeypatch.setattr(bot_router_module, "_create_bot_proxy_client", lambda: FakeClient())
@@ -797,7 +811,7 @@ async def test_chat_proxy_strips_client_openviking_connection_in_dev_mode(monkey
 
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
-            "/bot/v1/chat",
+            endpoint,
             json={
                 "message": "hello",
                 "openviking_connection": {
@@ -812,9 +826,9 @@ async def test_chat_proxy_strips_client_openviking_connection_in_dev_mode(monkey
             },
         )
 
-    assert response.status_code == 200
-    assert "openviking_connection" not in forwarded["json"]
-    assert forwarded["json"].get("user_id") == "default"
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Bot proxy requires a forwardable OpenViking API key."
+    assert forwarded == {}
 
 
 @pytest.mark.asyncio
@@ -862,6 +876,7 @@ async def test_chat_stream_proxy_preserves_sse_event_boundaries(monkeypatch):
     ) as client:
         response = await client.post(
             "/bot/v1/chat/stream",
+            headers={"X-API-Key": "active-user-key"},
             json={"message": "hello"},
         )
 
