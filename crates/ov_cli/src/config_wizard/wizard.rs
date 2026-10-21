@@ -42,6 +42,17 @@ const TEXT_INPUT_PROMPT: &str = "  > ";
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IdentityMode {
     RootKey,
+    Trusted,
+}
+
+impl IdentityMode {
+    fn from_auth_mode(auth_mode: Option<&str>) -> Self {
+        if auth_mode == Some("trusted") {
+            Self::Trusted
+        } else {
+            Self::RootKey
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1858,6 +1869,7 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                     copy(Language::current(), "Account ID", "账户 ID"),
                     IdentityField::Account,
                     mode,
+                    account.as_deref(),
                 )? {
                     PromptResult::Value(value) => {
                         account = Some(value);
@@ -1882,6 +1894,7 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                     copy(Language::current(), "User ID", "用户 ID"),
                     IdentityField::User,
                     mode,
+                    user.as_deref(),
                 )? {
                     PromptResult::Value(value) => {
                         user = Some(value);
@@ -1963,9 +1976,13 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                                 PromptResult::Value(0) => {
                                     key_mode = Some(CustomKeyMode::RootKey);
                                     root_api_key = api_key.clone();
-                                    identity_mode = Some(IdentityMode::RootKey);
-                                    account = None;
-                                    user = None;
+                                    identity_mode = Some(IdentityMode::from_auth_mode(
+                                        server_auth_mode.as_deref(),
+                                    ));
+                                    if identity_mode != Some(IdentityMode::Trusted) {
+                                        account = None;
+                                        user = None;
+                                    }
                                     stage = Stage::Account;
                                     continue;
                                 }
@@ -2028,7 +2045,8 @@ async fn run_add_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<bool
                             account.as_deref(),
                             user.as_deref(),
                         ) {
-                            identity_mode = Some(IdentityMode::RootKey);
+                            identity_mode =
+                                Some(IdentityMode::from_auth_mode(server_auth_mode.as_deref()));
                             stage = Stage::Account;
                             continue;
                         }
@@ -2278,6 +2296,11 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                 &[],
             )? {
                 PromptResult::Value(value) => {
+                    if value.trim_end_matches('/') != url.trim_end_matches('/') {
+                        account = None;
+                        user = None;
+                        identity_mode = None;
+                    }
                     url = value;
                     stage = Stage::ApiKeyChoice;
                 }
@@ -2541,6 +2564,7 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                     copy(Language::current(), "Account ID", "账户 ID"),
                     IdentityField::Account,
                     mode,
+                    account.as_deref(),
                 )? {
                     PromptResult::Value(value) => {
                         account = Some(value);
@@ -2565,12 +2589,11 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                     copy(Language::current(), "User ID", "用户 ID"),
                     IdentityField::User,
                     mode,
+                    user.as_deref(),
                 )? {
                     PromptResult::Value(value) => {
                         user = Some(value);
-                        if identity_mode == Some(IdentityMode::RootKey) {
-                            api_key_was_entered = false;
-                        }
+                        api_key_was_entered = false;
                         stage = Stage::Validate;
                     }
                     PromptResult::Back => {
@@ -2644,9 +2667,13 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                                     key_mode = Some(CustomKeyMode::RootKey);
                                     key_edit_action = Some(CustomEditKeyAction::SetRootKey);
                                     root_api_key = api_key.clone();
-                                    identity_mode = Some(IdentityMode::RootKey);
-                                    account = None;
-                                    user = None;
+                                    identity_mode = Some(IdentityMode::from_auth_mode(
+                                        server_auth_mode.as_deref(),
+                                    ));
+                                    if identity_mode != Some(IdentityMode::Trusted) {
+                                        account = None;
+                                        user = None;
+                                    }
                                     stage = Stage::Account;
                                     continue;
                                 }
@@ -2724,7 +2751,8 @@ async fn run_edit_config(store: &ConfigStore, ui: &mut LiveRegion) -> Result<boo
                             account.as_deref(),
                             user.as_deref(),
                         ) {
-                            identity_mode = Some(IdentityMode::RootKey);
+                            identity_mode =
+                                Some(IdentityMode::from_auth_mode(server_auth_mode.as_deref()));
                             stage = Stage::Account;
                             continue;
                         }
@@ -4393,6 +4421,7 @@ async fn create_account_and_user(
         copy(Language::current(), "New account ID", "新账户 ID"),
         IdentityField::Account,
         IdentityMode::RootKey,
+        None,
     )? {
         PromptResult::Value(value) => value,
         PromptResult::Back => return Ok(PromptResult::Back),
@@ -4408,6 +4437,7 @@ async fn create_account_and_user(
         ),
         IdentityField::User,
         IdentityMode::RootKey,
+        None,
     )? {
         PromptResult::Value(value) => value,
         PromptResult::Back => return Ok(PromptResult::Back),
@@ -5219,8 +5249,9 @@ fn prompt_identity_value(
     prompt: &str,
     field: IdentityField,
     mode: IdentityMode,
+    current: Option<&str>,
 ) -> Result<PromptResult<String>> {
-    let (default, value_label, helper_lines) = identity_prompt_parts(mode);
+    let (default, value_label, helper_lines) = identity_prompt_parts(mode, current);
     let mut error: Option<String> = None;
     loop {
         let mut lines = helper_lines.clone();
@@ -5253,7 +5284,7 @@ fn prompt_new_user_id(
     prompt: &str,
     existing_users: &[RootUserSummary],
 ) -> Result<PromptResult<String>> {
-    let (_, _, helper_lines) = identity_prompt_parts(IdentityMode::RootKey);
+    let (_, _, helper_lines) = identity_prompt_parts(IdentityMode::RootKey, None);
     let mut error: Option<String> = None;
     loop {
         let mut lines = helper_lines.clone();
@@ -5288,7 +5319,8 @@ fn duplicate_user_id_error(user_id: &str) -> String {
 
 fn identity_prompt_parts(
     mode: IdentityMode,
-) -> (Option<&'static str>, Option<InputValueLabel>, Vec<String>) {
+    current: Option<&str>,
+) -> (Option<&str>, Option<InputValueLabel>, Vec<String>) {
     match mode {
         IdentityMode::RootKey => (
             None,
@@ -5302,6 +5334,25 @@ fn identity_prompt_parts(
                 .to_string(),
             ],
         ),
+        IdentityMode::Trusted => {
+            let current = current.filter(|value| !value.trim().is_empty());
+            (
+                Some(current.unwrap_or("default")),
+                Some(if current.is_some() {
+                    InputValueLabel::Current
+                } else {
+                    InputValueLabel::Default
+                }),
+                vec![
+                    theme::muted(copy(
+                        Language::current(),
+                        "Trusted mode: press Enter to use the shown identity, or enter your own.",
+                        "Trusted 模式：回车使用显示的身份，也可输入自定义身份。",
+                    ))
+                    .to_string(),
+                ],
+            )
+        }
     }
 }
 
@@ -7132,7 +7183,8 @@ mod tests {
 
     #[test]
     fn root_key_identity_prompt_has_no_default_identity() {
-        let (default, value_label, helper_lines) = identity_prompt_parts(IdentityMode::RootKey);
+        let (default, value_label, helper_lines) =
+            identity_prompt_parts(IdentityMode::RootKey, None);
         let lines = input_live_lines(
             "Create a new OpenViking config.",
             "Account ID",
@@ -7147,6 +7199,49 @@ mod tests {
         assert!(!text.contains("Default:"));
         assert!(!text.contains("Current:"));
         assert!(text.contains("Root API keys require an explicit account and user."));
+    }
+
+    #[test]
+    fn trusted_identity_prompt_defaults_to_default() {
+        let mode = IdentityMode::from_auth_mode(Some("trusted"));
+        for current in [None, Some(""), Some("  ")] {
+            let (default, label, helper_lines) = identity_prompt_parts(mode, current);
+            assert_eq!(default, Some("default"));
+            assert!(matches!(label, Some(InputValueLabel::Default)));
+            let text = input_live_lines(
+                "test",
+                "Account ID",
+                default,
+                label,
+                false,
+                &helper_lines,
+                None,
+            )
+            .join("\n");
+            assert!(text.contains("Default:"));
+            assert!(text.contains("default"));
+            assert!(text.contains("Trusted mode:"));
+        }
+    }
+
+    #[test]
+    fn trusted_identity_prompt_keeps_existing_identity() {
+        let mode = IdentityMode::from_auth_mode(Some("trusted"));
+        for current in ["acme", "alice"] {
+            let (default, label, _) = identity_prompt_parts(mode, Some(current));
+            assert_eq!(default, Some(current));
+            assert!(matches!(label, Some(InputValueLabel::Current)));
+        }
+    }
+
+    #[test]
+    fn non_trusted_identity_prompt_has_no_default() {
+        for auth_mode in [None, Some("api_key"), Some("oidc")] {
+            let mode = IdentityMode::from_auth_mode(auth_mode);
+            let (default, label, _) = identity_prompt_parts(mode, Some("old-identity"));
+            assert_eq!(default, None);
+            assert!(label.is_none());
+        }
     }
 
     #[test]
