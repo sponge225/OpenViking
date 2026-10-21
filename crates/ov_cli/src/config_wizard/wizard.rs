@@ -27,8 +27,8 @@ use serde_json::Value;
 use super::store::{
     ApiKeyRole, CandidateValidation, ConfigDraft, ConfigEntry, ConfigKind, ConfigStore,
     IdentityField, OPENVIKING_SERVICE_URL, build_config, custom_allows_empty_api_key,
-    normalize_custom_url, probe_candidate_root_key, validate_candidate_config,
-    validate_candidate_config_detailed, validate_config, validate_config_name,
+    normalize_custom_url, validate_candidate_config, validate_candidate_config_detailed,
+    validate_candidate_config_with_role, validate_config, validate_config_name,
     validate_identity_value, validation_error_copy, validation_error_copy_zh,
 };
 
@@ -4818,7 +4818,7 @@ async fn validate_draft(
         let CandidateValidation {
             api_key_role: role,
             auth_mode,
-        } = probe_candidate_root_key(&detection_config, require_api_key).await?;
+        } = validate_candidate_config_detailed(&detection_config, require_api_key).await?;
         if config.root_api_key.as_deref() == config.api_key.as_deref() {
             root_api_key_role = role;
         }
@@ -4879,10 +4879,7 @@ async fn validate_root_api_key_role(
     root_config.account = None;
     root_config.user = None;
 
-    match probe_candidate_root_key(&root_config, require_api_key)
-        .await?
-        .api_key_role
-    {
+    match validate_candidate_config_with_role(&root_config, require_api_key).await? {
         Some(role) => Ok(role),
         None => Err(Error::Config(
             "Expected a root API key, but the server rejected root access.".to_string(),

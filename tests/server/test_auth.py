@@ -4,7 +4,7 @@
 """Tests for multi-tenant authentication (openviking/server/auth.py)."""
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -1544,41 +1544,6 @@ def test_validate_with_key_any_host_passes():
     for host in ("0.0.0.0", "::", "192.168.1.1", "127.0.0.1"):
         config = ServerConfig(host=host, root_api_key="some-secret-key")
         validate_server_config(config)  # should not raise
-
-
-@pytest.mark.parametrize("root_api_key", [" ", "\t", " \t\r\n "])
-def test_validate_api_key_mode_rejects_whitespace_only_root_key(root_api_key):
-    from openviking.server.auth.plugins import ApiKeyAuthPlugin
-
-    config = ServerConfig(auth_mode="api_key", root_api_key=root_api_key)
-
-    with pytest.raises(SystemExit):
-        ApiKeyAuthPlugin().validate_config(config)
-    with pytest.raises(SystemExit):
-        validate_server_config(config)
-
-
-async def test_api_key_initialize_strips_root_key():
-    from openviking.server.auth.plugins import ApiKeyAuthPlugin
-
-    config = ServerConfig(auth_mode="api_key", root_api_key=f" \t{ROOT_KEY}\n")
-    assert config.root_api_key == ROOT_KEY
-    app = FastAPI()
-    app.state.service_name = "openviking-server"
-    plugin = ApiKeyAuthPlugin()
-    manager = MagicMock()
-    manager.load = AsyncMock()
-    manager.close = AsyncMock()
-
-    with patch(
-        "openviking.server.auth.plugins.api_key.build_api_key_manager",
-        return_value=manager,
-    ) as build_manager:
-        await plugin.initialize(app, MagicMock(), config)
-
-    assert build_manager.call_args.kwargs["root_key"] == ROOT_KEY
-    assert app.state.api_key_manager is manager
-    await plugin.shutdown()
 
 
 def test_validate_trusted_mode_requires_root_key_on_every_host():

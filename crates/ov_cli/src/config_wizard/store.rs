@@ -622,21 +622,6 @@ pub(crate) async fn validate_candidate_config_detailed(
     config: &Config,
     require_api_key: bool,
 ) -> Result<CandidateValidation> {
-    validate_candidate_config_inner(config, require_api_key, false).await
-}
-
-pub(crate) async fn probe_candidate_root_key(
-    config: &Config,
-    require_api_key: bool,
-) -> Result<CandidateValidation> {
-    validate_candidate_config_inner(config, require_api_key, true).await
-}
-
-async fn validate_candidate_config_inner(
-    config: &Config,
-    require_api_key: bool,
-    root_probe_only: bool,
-) -> Result<CandidateValidation> {
     config.validate_runtime_values()?;
 
     let api_key = non_empty_option(config.api_key.as_deref());
@@ -677,13 +662,11 @@ async fn validate_candidate_config_inner(
     }
 
     let auth = config.effective_auth(false);
-    let account = non_empty_option(auth.account.as_deref());
-    let user = non_empty_option(auth.user.as_deref());
     let client = BaseClient::new(
         &config.url,
         auth.api_key.clone(),
-        account.clone(),
-        user.clone(),
+        auth.account.clone(),
+        auth.user.clone(),
         config.actor_peer_id.clone(),
         timeout,
         config.profile,
@@ -692,11 +675,6 @@ async fn validate_candidate_config_inner(
     .with_gateway_token(config.effective_gateway_token());
 
     if auth_mode.as_deref() == Some("trusted") {
-        if !root_probe_only && (account.is_none() || user.is_none()) {
-            return Err(Error::Config(
-                "Trusted mode requires both account and user for normal commands.".to_string(),
-            ));
-        }
         let root_client = BaseClient::new(
             &config.url,
             auth.api_key,
@@ -709,7 +687,7 @@ async fn validate_candidate_config_inner(
         )
         .with_gateway_token(config.effective_gateway_token());
         let _: Value = root_client.get("/api/v1/admin/accounts", &[]).await?;
-        if !root_probe_only {
+        if auth.account.is_some() && auth.user.is_some() {
             let _: Value = client.get("/api/v1/system/status", &[]).await?;
         }
         return Ok(CandidateValidation {
@@ -911,8 +889,7 @@ mod tests {
     use super::{
         ApiKeyRole, ConfigDraft, ConfigKind, ConfigStore, OPENVIKING_SERVICE_URL,
         admin_probe_ambiguous_status, admin_probe_regular_key_status, build_config,
-        probe_candidate_root_key, validate_candidate_config, validate_candidate_config_with_role,
-        validate_config_name,
+        validate_candidate_config, validate_candidate_config_with_role, validate_config_name,
     };
     use crate::config::Config;
     use std::fs;
@@ -1403,43 +1380,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trusted_final_config_requires_identity_but_root_probe_does_not() {
-        for (account, user) in [
-            (None, None),
-            (Some("default"), None),
-            (None, Some("default")),
-        ] {
-            let url = spawn_trusted_probe_server("root-key").await;
-            let mut config = sample_config(&url, Some("root-key"));
-            config.account = account.map(ToString::to_string);
-            config.user = user.map(ToString::to_string);
-
-            let error = validate_candidate_config(&config, true)
-                .await
-                .expect_err("trusted final config with incomplete identity should fail");
-            assert!(matches!(
-                error,
-                crate::error::Error::Config(message)
-                    if message.contains("both account and user")
-            ));
-        }
-
-        let url = spawn_trusted_probe_server("root-key").await;
-        let mut config = sample_config(&url, Some("root-key"));
-        let probe = probe_candidate_root_key(&config, true)
-            .await
-            .expect("root-only trusted probe should validate deployment key");
-        assert_eq!(probe.api_key_role, Some(ApiKeyRole::Root));
-        assert_eq!(probe.auth_mode.as_deref(), Some("trusted"));
-
-        config.account = Some("default".to_string());
-        config.user = Some("default".to_string());
-        validate_candidate_config(&config, true)
-            .await
-            .expect("trusted final config with identity should validate");
-    }
-
-    #[tokio::test]
     async fn local_empty_key_without_health_auth_mode_probes_status() {
         let url = spawn_status_auth_probe_server().await;
         let config = sample_config(&url, None);
@@ -1618,47 +1558,6 @@ mod tests {
                     )
                 } else {
                     http_response(404, r#"{"error":{"message":"not found"}}"#)
-                };
-                let _ = stream.write_all(response.as_bytes()).await;
-            }
-        });
-        format!("http://{addr}")
-    }
-
-    async fn spawn_trusted_probe_server(root_api_key: &'static str) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test server should bind");
-        let addr = listener.local_addr().expect("test server should have addr");
-        tokio::spawn(async move {
-            for _ in 0..6 {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    return;
-                };
-                let mut buffer = vec![0; 4096];
-                let Ok(read) = stream.read(&mut buffer).await else {
-                    return;
-                };
-                let request = String::from_utf8_lossy(&buffer[..read]);
-                let lower_request = request.to_ascii_lowercase();
-                let root_header = format!("x-api-key: {root_api_key}");
-                let response = if request.starts_with("GET /health ") {
-                    http_response(200, r#"{"healthy":true,"auth_mode":"trusted"}"#)
-                } else if request.starts_with("GET /api/v1/admin/accounts ")
-                    && lower_request.contains(&root_header)
-                {
-                    http_response(200, r#"{"accounts":[]}"#)
-                } else if request.starts_with("GET /api/v1/system/status ")
-                    && lower_request.contains(&root_header)
-                    && lower_request.contains("x-openviking-account: default")
-                    && lower_request.contains("x-openviking-user: default")
-                {
-                    http_response(200, r#"{"status":"ok","result":{"initialized":true}}"#)
-                } else {
-                    http_response(
-                        401,
-                        r#"{"error":{"code":"AuthenticationError","message":"invalid identity"}}"#,
-                    )
                 };
                 let _ = stream.write_all(response.as_bytes()).await;
             }

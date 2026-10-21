@@ -390,11 +390,6 @@ class ServerConfig(BaseModel):
     def normalize_user_config_defaults(cls, value: Any) -> Any:
         return value.model_dump() if isinstance(value, UserConfig) else value
 
-    @field_validator("root_api_key", mode="before")
-    @classmethod
-    def normalize_root_api_key(cls, value: Any) -> Any:
-        return value.strip() if isinstance(value, str) else value
-
     def get_effective_auth_mode(self) -> str:
         """Get the configured auth mode, defaulting to API key authentication."""
         auth_mode_text = str(self.auth_mode).strip() if self.auth_mode is not None else ""
@@ -590,10 +585,10 @@ def validate_server_config(config: ServerConfig) -> None:
     Raises:
         SystemExit: If the configuration is unsafe.
     """
-    # Reject empty or whitespace-only keys before auth plugin initialization.
-    if config.root_api_key is not None and not config.root_api_key.strip():
+    # Check for empty root_api_key
+    if config.root_api_key == "":
         logger.error(
-            "Invalid server.root_api_key: empty or whitespace-only values are not allowed. "
+            "Invalid server.root_api_key: empty string is not allowed. "
             "Set a non-empty server.root_api_key in ov.conf and restart. "
             "Only remove this setting if the selected auth mode does not require a root key; "
             "trusted and api_key modes require it even on localhost."
