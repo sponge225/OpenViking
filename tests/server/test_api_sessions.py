@@ -391,7 +391,8 @@ async def test_tool_result_externalization_respects_server_config_disabled(servi
 
     app = create_app(
         config=ServerConfig(
-            tool_output_externalization=ToolOutputExternalizationConfig(enabled=False)
+            root_api_key="test-root-key",
+            tool_output_externalization=ToolOutputExternalizationConfig(enabled=False),
         ),
         service=service,
     )

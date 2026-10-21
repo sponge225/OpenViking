@@ -23,7 +23,7 @@ async def api_client(
     service: OpenVikingService,
 ) -> AsyncGenerator[Tuple[httpx.AsyncClient, OpenVikingService], None]:
     """Create in-process HTTP client for API endpoint tests."""
-    app = create_app(config=ServerConfig(), service=service)
+    app = create_app(config=ServerConfig(root_api_key="test-root-key"), service=service)
     set_service(service)
     app.state.auth_plugin = FixedIdentityAuthPlugin()
 

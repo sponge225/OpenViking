@@ -135,7 +135,7 @@ async def settings_http(fake_viking_fs, monkeypatch):
         viking_fs=fake_viking_fs,
         runtime_config_manager=runtime_config,
     )
-    app = create_app(config=ServerConfig(), service=service)
+    app = create_app(config=ServerConfig(root_api_key="test-root-key"), service=service)
     set_service(service)
     app.state.auth_plugin = FixedIdentityAuthPlugin()
     # Admin routes gate on a present APIKeyManager, so provide a stand-in that
@@ -205,7 +205,8 @@ def test_server_default_memory_policy_is_configured_on_session_service(fake_viki
     sessions = SessionService(viking_fs=fake_viking_fs)
     service = SimpleNamespace(sessions=sessions)
     config = ServerConfig(
-        user_config_defaults=UserConfig(memory_policy={"memory_types": ["profile"]})
+        root_api_key="test-root-key",
+        user_config_defaults=UserConfig(memory_policy={"memory_types": ["profile"]}),
     )
 
     create_app(config=config, service=service)
@@ -225,7 +226,8 @@ async def test_auto_commit_defaults_apply_to_new_sessions(fake_viking_fs, monkey
         ServerConfig(user_config_defaults={"auto_commit_policy": {"idle_timeout_seconds": 299}})
     sessions = SessionService(viking_fs=fake_viking_fs)
     config = ServerConfig(
-        user_config_defaults={"auto_commit_policy": {"idle_timeout_seconds": 300}}
+        root_api_key="test-root-key",
+        user_config_defaults={"auto_commit_policy": {"idle_timeout_seconds": 300}},
     )
     create_app(
         config=config,
