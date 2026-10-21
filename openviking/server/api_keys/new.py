@@ -228,6 +228,9 @@ class APIKeyManager:
     async def list_accounts(self, **filters):
         return await self._store.list_accounts(**filters)
 
+    async def list_accounts_page(self, **filters):
+        return await self._store.list_accounts_page(**filters)
+
     async def list_users_page(self, account_id, **filters):
         expose_key = filters.pop("expose_key", True)
         store_filters = {
@@ -236,7 +239,7 @@ class APIKeyManager:
                 "limit",
                 "name_filter",
                 "role_filter",
-                "page",
+                "offset",
                 "query_filter",
                 "fresh",
             )
