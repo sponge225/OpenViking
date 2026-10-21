@@ -237,8 +237,8 @@ Options:
   --dist CHANNEL     Ignored; kept so older commands keep working.
   --url URL          OpenViking server base URL.
   --api-key KEY      Required OpenViking API key.
-  --account ID       Optional OpenViking account.
-  --user ID          Optional OpenViking user.
+  --account ID       Required for Trusted mode (local default: default).
+  --user ID          Required for Trusted mode (local default: default).
   --statusline       Register the Claude Code statusline without asking.
   --no-statusline    Skip the statusline prompt.
   --uninstall        Remove the Cursor, TRAE, TRAE CN, ZCode and Kimi Code integrations,
@@ -616,9 +616,11 @@ try { c = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
 if (url) c.url = url;
 if (apiKey !== "__OPENVIKING_KEEP__") c.api_key = apiKey;
 if (account !== "__OPENVIKING_KEEP__") {
+  delete c.account_id;
   if (account) c.account = account; else delete c.account;
 }
 if (user !== "__OPENVIKING_KEEP__") {
+  delete c.user_id;
   if (user) c.user = user; else delete c.user;
 }
 fs.mkdirSync(require("node:path").dirname(file), { recursive: true });
@@ -1310,8 +1312,8 @@ EOF
 # ovcli.conf wizard
 # ---------------------------------------------------------------------------
 
-prompt_connection() { # sets WIZ_URL / WIZ_KEY (WIZ_KEY may stay __OPENVIKING_KEEP__)
-  local current_url="$1" current_key="$2" url_input reply def=2 custom hidden
+prompt_connection() { # sets WIZ_URL / WIZ_KEY / WIZ_TRUSTED
+  local current_url="$1" current_key="$2" url_input reply def=2 custom hidden server_choice auth_default=1
   custom="$(t 'Custom URL' '自定义 URL')"
   if [ -n "$current_url" ]; then
     custom="$(t 'Custom URL / keep current' '自定义 URL / 保持当前')  [$current_url]"
@@ -1319,16 +1321,21 @@ prompt_connection() { # sets WIZ_URL / WIZ_KEY (WIZ_KEY may stay __OPENVIKING_KE
     def=0
   fi
   tui_menu "$(t 'Where do you connect to OpenViking?' '连接到哪个 OpenViking 服务？')" "$def" \
-    "$(t 'Self-hosted / local' '自建 / 本地')  [http://127.0.0.1:1933]" \
+    "$(t 'Self-hosted / local (Trusted)' '自建 / 本地（Trusted）')  [http://127.0.0.1:1933]" \
     "$(t 'Volcengine OpenViking Cloud' '火山引擎 OpenViking 云服务')  [api.vikingdb.cn-beijing.volces.com]" \
     "$custom"
-  case "$TUI_MENU_CHOICE" in
-    0) WIZ_URL="http://127.0.0.1:1933" ;;
+  server_choice="$TUI_MENU_CHOICE"
+  WIZ_TRUSTED=0
+  case "$server_choice" in
+    0) WIZ_URL="http://127.0.0.1:1933"; WIZ_TRUSTED=1 ;;
     1) WIZ_URL="https://api.vikingdb.cn-beijing.volces.com/openviking" ;;
     *)
       ask "$(t 'Server URL' '服务地址') [${current_url:-http://127.0.0.1:1933}]: "
       read_tty url_input
       WIZ_URL="${url_input:-${current_url:-http://127.0.0.1:1933}}"
+      if [ "$WIZ_URL" = "$current_url" ] && { [ -n "$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")" ] || [ -n "$(cred_value "$CRED_USER" "$CUR_USER")" ]; }; then auth_default=0; fi
+      tui_menu "$(t 'Server authentication mode' '服务认证模式')" "$auth_default" "Trusted" "API Key"
+      [ "$TUI_MENU_CHOICE" -ne 0 ] || WIZ_TRUSTED=1
       ;;
   esac
 
@@ -1336,7 +1343,7 @@ prompt_connection() { # sets WIZ_URL / WIZ_KEY (WIZ_KEY may stay __OPENVIKING_KE
   while :; do
     if [ -n "$current_key" ]; then
       ask "$(t "API key [Enter = keep $(mask_secret "$current_key"); $hidden]: " "API key [回车 = 保留 $(mask_secret "$current_key")；$hidden]: ")"
-    elif [ "$TUI_MENU_CHOICE" -eq 1 ]; then
+    elif [ "$server_choice" -eq 1 ]; then
       info "$(t 'Get an API key in the OpenViking console, under User Management → API Key:' '在 OpenViking 控制台的「用户管理 → API Key」获取密钥：')"
       info "  https://console.volcengine.com/vikingdb/openviking/region:openviking+cn-beijing"
       ask "$(t "API key ($hidden): " "API key（$hidden）: ")"
@@ -1368,14 +1375,34 @@ cred_value() { # cred_value <chosen> <stored>
   if [ "$1" = "__OPENVIKING_KEEP__" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi
 }
 
+use_prompted_connection() {
+  CRED_URL="$WIZ_URL"
+  [ "$WIZ_KEY" = "__OPENVIKING_KEEP__" ] || CRED_KEY="$WIZ_KEY"
+  if [ "$CRED_URL" != "$CUR_URL" ]; then
+    [ "$ACCOUNT_ARG" != "__OPENVIKING_UNSET__" ] || CRED_ACCOUNT=""
+    [ "$USER_ARG" != "__OPENVIKING_UNSET__" ] || CRED_USER=""
+  fi
+  if [ "$WIZ_TRUSTED" -eq 1 ]; then
+    CRED_ACCOUNT="$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")"
+    CRED_USER="$(cred_value "$CRED_USER" "$CUR_USER")"
+    CRED_ACCOUNT="${CRED_ACCOUNT:-default}"
+    CRED_USER="${CRED_USER:-default}"
+  else
+    CRED_ACCOUNT=""; CRED_USER=""
+  fi
+}
+
 gather_credentials() {
   step_heading "$(t 'OpenViking credentials' 'OpenViking 凭据配置') ($OVCLI_CONF)"
   CUR_URL="$(json_get "$OVCLI_CONF" url)"
   CUR_KEY="$(json_get "$OVCLI_CONF" api_key)"
   CUR_ACCOUNT="$(json_get "$OVCLI_CONF" account)"
   CUR_USER="$(json_get "$OVCLI_CONF" user)"
+  [ -n "$CUR_ACCOUNT" ] || CUR_ACCOUNT="$(json_get "$OVCLI_CONF" account_id)"
+  [ -n "$CUR_USER" ] || CUR_USER="$(json_get "$OVCLI_CONF" user_id)"
 
   CRED_URL="${URL_ARG:-$CUR_URL}"
+  if [ "$CRED_URL" != "$CUR_URL" ]; then CRED_ACCOUNT=""; CRED_USER=""; fi
   [ "$API_KEY_ARG" = "__OPENVIKING_UNSET__" ] || CRED_KEY="$API_KEY_ARG"
   [ "$ACCOUNT_ARG" = "__OPENVIKING_UNSET__" ] || CRED_ACCOUNT="$ACCOUNT_ARG"
   [ "$USER_ARG" = "__OPENVIKING_UNSET__" ] || CRED_USER="$USER_ARG"
@@ -1398,11 +1425,11 @@ gather_credentials() {
         "$(t 'Reconfigure (server URL / API key)' '重新配置（服务地址 / API key）')"
       if [ "$TUI_MENU_CHOICE" -eq 1 ]; then
         prompt_connection "$CUR_URL" "$CUR_KEY"
-        CRED_URL="$WIZ_URL"; CRED_KEY="$WIZ_KEY"
+        use_prompted_connection
       fi
     else
       prompt_connection "" ""
-      CRED_URL="$WIZ_URL"; CRED_KEY="$WIZ_KEY"
+      use_prompted_connection
     fi
   fi
   if [ -z "$CRED_URL" ]; then
@@ -1450,6 +1477,10 @@ check_server() {
   while :; do
     key="$(cred_value "$CRED_KEY" "$CUR_KEY")"
     probe_server "$CRED_URL" "$key" "$(cred_value "$CRED_ACCOUNT" "$CUR_ACCOUNT")" "$(cred_value "$CRED_USER" "$CUR_USER")"
+    if [ "$PROBE_CODE" = "400" ]; then
+      err "$(t 'Server rejected the connection (HTTP 400). For Trusted mode, re-run with --account <account> --user <user> (local default: default/default).' '服务拒绝了连接（HTTP 400）。Trusted 模式请补齐 --account <account> --user <user>（本地默认：default/default）后重新运行。')"
+      exit 2
+    fi
     def=0
     case "$PROBE_RESULT" in
       ok)
@@ -1471,8 +1502,7 @@ check_server() {
       "$(t 'Continue anyway' '仍然继续')"
     [ "$TUI_MENU_CHOICE" -eq 0 ] || return 0
     prompt_connection "$CRED_URL" "$key"
-    CRED_URL="$WIZ_URL"
-    [ "$WIZ_KEY" = "__OPENVIKING_KEEP__" ] || CRED_KEY="$WIZ_KEY"
+    use_prompted_connection
   done
 }
 

@@ -216,7 +216,7 @@ printf '%s|%s\\n' "$WIZ_URL" "$WIZ_KEY"
 test("the credentials step writes ovcli.conf when the stored key is kept", (t) => {
   const home = makeTempHome(t);
   const conf = join(home, "ovcli.conf");
-  writeFileSync(conf, `${JSON.stringify({ url: "http://127.0.0.1:1933", api_key: "stored-key", output: "table" }, null, 2)}\n`);
+  writeFileSync(conf, `${JSON.stringify({ url: "http://127.0.0.1:1933", api_key: "stored-key", account: "acct", user: "alice", account_id: "acct", user_id: "alice", output: "table" }, null, 2)}\n`);
 
   const result = runInstallerPrelude(`
 tui_menu() { TUI_MENU_CHOICE=1; }
@@ -234,6 +234,54 @@ write_ovcli
     api_key: "stored-key",
     output: "table",
   });
+});
+
+test("Trusted setup fills missing identities and preserves explicit ones when offline", (t) => {
+  const home = makeTempHome(t);
+  const conf = join(home, "ovcli.conf");
+  for (const identity of [{}, { account: "acct", user: "alice" }, { url: "https://old.example.com", account: "acct", user: "alice" }]) {
+    writeFileSync(conf, JSON.stringify({ url: "http://127.0.0.1:1933", api_key: "stored-key", ...identity }));
+    const result = runInstallerPrelude(`
+MENU_ANSWERS="1 0"
+tui_menu() { set -- $MENU_ANSWERS; TUI_MENU_CHOICE="$1"; shift; MENU_ANSWERS="$*"; }
+probe_server() { PROBE_RESULT="unreachable"; PROBE_CODE="000"; }
+INTERACTIVE=1
+OV_HOME=${JSON.stringify(home)}
+OVCLI_CONF=${JSON.stringify(conf)}
+exec 3< <(printf '\\n')
+gather_credentials
+INTERACTIVE=0
+check_server
+write_ovcli
+`);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(conf, "utf8")), {
+      url: "http://127.0.0.1:1933", api_key: "stored-key",
+      account: (!identity.url && identity.account) || "default",
+      user: (!identity.url && identity.user) || "default",
+    });
+  }
+});
+
+test("HTTP 400 stops installation before writing incomplete Trusted credentials", (t) => {
+  const home = makeTempHome(t);
+  const conf = join(home, "ovcli.conf");
+  for (const interactive of [0, 1]) {
+    const result = runInstallerPrelude(`
+probe_server() { PROBE_RESULT="http"; PROBE_CODE="400"; }
+tui_menu() { TUI_MENU_CHOICE=1; }
+INTERACTIVE=${interactive}
+OV_HOME=${JSON.stringify(home)}
+OVCLI_CONF=${JSON.stringify(conf)}
+CRED_URL="http://127.0.0.1:1933"
+CRED_KEY="local-key"
+check_server
+write_ovcli
+`);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /HTTP 400.*--account.*--user/);
+    assert.equal(existsSync(conf), false);
+  }
 });
 
 test("menu digit shortcuts move the cursor instead of confirming", () => {
@@ -446,7 +494,7 @@ test("re-entering after a failed server check probes the new values", async (t) 
 
   // First answer: re-enter; then the custom-URL arm, whose prompt keeps the URL.
   const result = await runInstallerPreludeAsync(`
-MENU_ANSWERS="0 2"
+MENU_ANSWERS="0 2 1"
 tui_menu() { set -- $MENU_ANSWERS; TUI_MENU_CHOICE="$1"; shift; MENU_ANSWERS="$*"; }
 INTERACTIVE=1
 exec 3< <(printf '\\nfresh-key\\n')
