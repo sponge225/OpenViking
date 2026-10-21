@@ -573,7 +573,7 @@ Version 1.39.0 is the minimum SDK version with the client context managers and c
     "dense": {
       "provider": "gemini",
       "api_key": "your-google-api-key",
-      "model": "gemini-embedding-2-preview",
+      "model": "gemini-embedding-2",
       "dimension": 3072
     }
   }
@@ -581,11 +581,17 @@ Version 1.39.0 is the minimum SDK version with the client context managers and c
 ```
 
 Available Gemini embedding models:
-- `gemini-embedding-2-preview`: 8192 token input limit, 1–3072 output dimension (MRL)
+- `gemini-embedding-2`: 8192 token input limit, 1–3072 output dimension (MRL)
 - `gemini-embedding-001`: 2048 token input limit, 1–3072 output dimension (MRL)
 - `text-embedding-004`: 2048 token input limit, 768 output dimension (fixed)
 
 Recommended dimensions: `768`, `1536`, or `3072` (default: `3072`).
+
+Gemini Embedding 2 represents task types as documented text instructions because
+the stable model does not accept the `task_type` request field. OpenViking applies
+these instructions when `query_param` or `document_param` is configured. If you
+change the model for an existing index, rebuild its vectors unless the provider
+explicitly guarantees that the two embedding spaces are compatible.
 
 Get your API key at https://aistudio.google.com/apikey
 
@@ -648,7 +654,7 @@ Get your API key at https://dashscope.console.aliyun.com/api-key
     "dense": {
       "provider": "gemini",
       "api_key": "your-google-api-key",
-      "model": "gemini-embedding-2-preview",
+      "model": "gemini-embedding-2",
       "dimension": 3072,
       "query_param": "RETRIEVAL_QUERY",
       "document_param": "RETRIEVAL_DOCUMENT"

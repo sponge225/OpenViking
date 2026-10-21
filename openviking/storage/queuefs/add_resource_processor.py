@@ -276,13 +276,15 @@ class AddResourceProcessor(DequeueHandlerBase):
                             error,
                         )
                         code = result.get("code")
-                        failure_result = {"code": code} if isinstance(code, str) and code else None
+                        failure_result = {"code": code} if isinstance(code, str) and code else {}
+                        if isinstance(result.get("details"), dict):
+                            failure_result["details"] = result["details"]
                         await tracker.fail(
                             msg.task_id,
                             error,
                             account_id=ctx.account_id,
                             user_id=ctx.user.user_id,
-                            result=failure_result,
+                            result=failure_result or None,
                         )
                         await self._record_watch_execution(msg, "failed", error)
                         terminal = True
@@ -399,14 +401,16 @@ class AddResourceProcessor(DequeueHandlerBase):
                     str(exc) or type(exc).__name__,
                 )
                 failure_result = (
-                    {"code": exc.code} if isinstance(exc, OpenVikingError) and exc.code else None
+                    {"code": exc.code} if isinstance(exc, OpenVikingError) and exc.code else {}
                 )
+                if isinstance(exc, OpenVikingError) and isinstance(exc.details, dict):
+                    failure_result["details"] = exc.details
                 await tracker.fail(
                     msg.task_id,
                     str(exc),
                     account_id=ctx.account_id,
                     user_id=ctx.user.user_id,
-                    result=failure_result,
+                    result=failure_result or None,
                 )
                 terminal = True
                 return ProcessResult.failed(str(exc))

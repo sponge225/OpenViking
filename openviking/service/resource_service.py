@@ -2069,6 +2069,9 @@ class ResourceService:
             code = task.result.get("code")
             if isinstance(code, str) and code:
                 failure["code"] = code
+            details = task.result.get("details")
+            if isinstance(details, dict):
+                failure["details"] = details
         return failure
 
     async def _execute_resource_ingestion(
